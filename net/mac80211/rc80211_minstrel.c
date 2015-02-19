@@ -356,7 +356,7 @@ minstrel_get_rate(void *priv, struct ieee80211_sta *sta,
 	 */
 	if (msr->perfect_tx_time < mr->perfect_tx_time ||
 	    msr->stats.sample_skipped >= 20) {
-		if (!msr->sample_limit != 0)
+		if (!msr->sample_limit)
 			return;
 
 		mi->sample_packets++;
