@@ -173,6 +173,7 @@ enum bpf_func_id {
 	BPF_FUNC_trace_printk,    /* int bpf_trace_printk(const char *fmt, int fmt_size, ...) */
 	BPF_FUNC_get_prandom_u32, /* u32 prandom_u32(void) */
 	BPF_FUNC_get_smp_processor_id, /* u32 raw_smp_processor_id(void) */
+	BPF_FUNC_skb_store_bytes, /* int skb_store_bytes(skb, offset, from, len) */
 	__BPF_FUNC_MAX_ID,
 };
 
