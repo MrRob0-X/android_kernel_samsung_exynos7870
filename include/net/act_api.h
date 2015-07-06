@@ -21,6 +21,8 @@ struct tcf_common {
 	struct gnet_stats_rate_est64	tcfc_rate_est;
 	spinlock_t			tcfc_lock;
 	struct rcu_head			tcfc_rcu;
+	struct gnet_stats_basic_cpu __percpu *cpu_bstats;
+	struct gnet_stats_queue __percpu *cpu_qstats;
 };
 #define tcf_head	common.tcfc_head
 #define tcf_index	common.tcfc_index
@@ -102,7 +104,7 @@ void tcf_hash_destroy(struct tc_action *a);
 u32 tcf_hash_new_index(struct tcf_hashinfo *hinfo);
 int tcf_hash_check(u32 index, struct tc_action *a, int bind);
 int tcf_hash_create(u32 index, struct nlattr *est, struct tc_action *a,
-		    int size, int bind);
+		    int size, int bind, bool cpustats);
 void tcf_hash_cleanup(struct tc_action *a, struct nlattr *est);
 void tcf_hash_insert(struct tc_action *a);
 
