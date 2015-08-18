@@ -559,7 +559,7 @@ dsa_slave_create(struct dsa_switch *ds, struct device *parent,
 	slave_dev->features = master->vlan_features;
 	slave_dev->ethtool_ops = &dsa_slave_ethtool_ops;
 	eth_hw_addr_inherit(slave_dev, master);
-	slave_dev->tx_queue_len = 0;
+	slave_dev->priv_flags |= IFF_NO_QUEUE;
 	slave_dev->netdev_ops = &dsa_slave_netdev_ops;
 
 	SET_NETDEV_DEV(slave_dev, parent);
