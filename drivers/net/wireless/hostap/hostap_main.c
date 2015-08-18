@@ -866,7 +866,7 @@ void hostap_setup_dev(struct net_device *dev, local_info_t *local,
 
 	switch(type) {
 	case HOSTAP_INTERFACE_AP:
-		dev->tx_queue_len = 0;	/* use main radio device queue */
+		dev->priv_flags |= IFF_NO_QUEUE;	/* use main radio device queue */
 		dev->netdev_ops = &hostap_mgmt_netdev_ops;
 		dev->type = ARPHRD_IEEE80211;
 		dev->header_ops = &hostap_80211_ops;
@@ -875,7 +875,7 @@ void hostap_setup_dev(struct net_device *dev, local_info_t *local,
 		dev->netdev_ops = &hostap_master_ops;
 		break;
 	default:
-		dev->tx_queue_len = 0;	/* use main radio device queue */
+		dev->priv_flags |= IFF_NO_QUEUE;	/* use main radio device queue */
 		dev->netdev_ops = &hostap_netdev_ops;
 	}
 
