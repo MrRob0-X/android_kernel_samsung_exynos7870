@@ -34,6 +34,7 @@
 #include "mdt.h"
 #include "alloc.h"		/* nilfs_palloc_destroy_cache() */
 
+#include <trace/events/nilfs2.h>
 
 #define NILFS_MDT_MAX_RA_BLOCKS		(16 - 1)
 
@@ -69,6 +70,9 @@ nilfs_mdt_insert_new_block(struct inode *inode, unsigned long block,
 	set_buffer_uptodate(bh);
 	mark_buffer_dirty(bh);
 	nilfs_mdt_mark_dirty(inode);
+
+	trace_nilfs2_mdt_insert_new_block(inode, inode->i_ino, block);
+
 	return 0;
 }
 
@@ -159,6 +163,8 @@ nilfs_mdt_submit_block(struct inode *inode, unsigned long blkoff,
 	get_bh(bh);
 	submit_bh(mode, bh);
 	ret = 0;
+
+	trace_nilfs2_mdt_submit_block(inode, inode->i_ino, blkoff, mode);
  out:
 	get_bh(bh);
 	*out_bh = bh;
