@@ -129,7 +129,7 @@ static int mqprio_init(struct Qdisc *sch, struct nlattr *opt)
 			return -ENOMEM;
 
 		priv->qdiscs[i] = qdisc;
-		qdisc->flags |= TCQ_F_ONETXQUEUE;
+		qdisc->flags |= TCQ_F_ONETXQUEUE | TCQ_F_NOPARENT;
 	}
 
 	/* If the mqprio options indicate that hardware should own
@@ -202,7 +202,7 @@ static int mqprio_graft(struct Qdisc *sch, unsigned long cl, struct Qdisc *new,
 	*old = dev_graft_qdisc(dev_queue, new);
 
 	if (new)
-		new->flags |= TCQ_F_ONETXQUEUE;
+		new->flags |= TCQ_F_ONETXQUEUE | TCQ_F_NOPARENT;
 
 	if (dev->flags & IFF_UP)
 		dev_activate(dev);
