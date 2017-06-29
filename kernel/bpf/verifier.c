@@ -777,6 +777,11 @@ static int check_xadd(struct verifier_env *env, int insn_idx, struct bpf_insn *i
 	if (err)
 		return err;
 
+	if (is_pointer_value(env, insn->src_reg)) {
+		verbose("R%d leaks addr into mem\n", insn->src_reg);
+		return -EACCES;
+	}
+
 	if (is_ctx_reg(env, insn->dst_reg)) {
 		verbose("BPF_XADD stores into R%d context is not allowed\n",
 			insn->dst_reg);
