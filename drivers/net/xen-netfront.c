@@ -1459,6 +1459,8 @@ static void xennet_disconnect_backend(struct netfront_info *info)
 	}
 }
 
+static void xennet_destroy_queues(struct netfront_info *info);
+
 /**
  * We are reconnecting to the backend, due to a suspend/resume, or a backend
  * driver restart.  We tear down our netif structure and recreate it, but
@@ -1476,6 +1478,12 @@ static int netfront_resume(struct xenbus_device *dev)
 	netif_tx_unlock_bh(info->netdev);
 
 	xennet_disconnect_backend(info);
+
+	rtnl_lock();
+	if (info->queues)
+		xennet_destroy_queues(info);
+	rtnl_unlock();
+
 	return 0;
 }
 
