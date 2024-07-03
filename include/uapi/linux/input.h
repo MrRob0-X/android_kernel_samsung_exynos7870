@@ -931,12 +931,9 @@ struct input_keymap_entry {
 #define SW_MUTE_DEVICE		0x0e  /* set = device disabled */
 #define SW_PEN_INSERTED		0x0f  /* set = pen inserted */
 #define SW_MACHINE_COVER	0x10  /* set = cover closed */
-#define SW_GLOVE		0x11	/* set = glove mode */
-#define SW_PEN_INSERT		0x13	/* set = pen out */
-#define SW_MAX			0x20
+#define SW_GLOVE		0x11  /* set = glove mode */
+#define SW_MAX			0x11
 #define SW_CNT			(SW_MAX+1)
-#define SW_FLIP			0x15	/* set = flip cover */
-#define	SW_CERTIFYHALL	0x1b	/* set = certify_hall... */
 
 /*
  * Misc events
