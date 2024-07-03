@@ -461,7 +461,7 @@ static void pen_insert_work(struct work_struct *work)
 		__func__, wac_i2c->pen_insert);
 
 	input_report_switch(wac_i2c->input_dev,
-		SW_PEN_INSERT, !wac_i2c->pen_insert);
+		SW_PEN_INSERTED, !wac_i2c->pen_insert);
 	input_sync(wac_i2c->input_dev);
 
 	/* batter saving mode */
@@ -557,7 +557,7 @@ static void wacom_i2c_set_input_values(struct i2c_client *client,
 	input_dev->evbit[0] |= BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 
 	input_dev->evbit[0] |= BIT_MASK(EV_SW);
-	input_set_capability(input_dev, EV_SW, SW_PEN_INSERT);
+	input_set_capability(input_dev, EV_SW, SW_PEN_INSERTED);
 
 	input_dev->open = wacom_i2c_input_open;
 	input_dev->close = wacom_i2c_input_close;
