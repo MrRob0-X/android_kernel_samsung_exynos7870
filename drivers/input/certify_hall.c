@@ -268,7 +268,7 @@ static int certify_hall_probe(struct platform_device *pdev)
 	ddata->event_val = SW_BACKFOLDING;
 #endif
 #else
-	ddata->event_val = SW_CERTIFYHALL;
+	ddata->event_val = SW_MACHINE_COVER;
 #endif
 
 	input_set_capability(input, EV_SW, ddata->event_val);
