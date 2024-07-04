@@ -6,6 +6,7 @@
 #ifndef _WG_ALLOWEDIPS_H
 #define _WG_ALLOWEDIPS_H
 
+#include <asm/unaligned.h>
 #include <linux/mutex.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
