@@ -3266,9 +3266,7 @@ static int ath10k_wmi_start_scan_calc_len(struct ath10k *ar,
 	else
 		len = sizeof(struct wmi_start_scan_cmd);
 
-	if (arg->ie_len) {
-		if (!arg->ie)
-			return -EINVAL;
+	if (arg->ie_len > 0) {
 		if (arg->ie_len > WLAN_SCAN_PARAMS_MAX_IE_LEN)
 			return -EINVAL;
 
@@ -3276,9 +3274,7 @@ static int ath10k_wmi_start_scan_calc_len(struct ath10k *ar,
 		len += roundup(arg->ie_len, 4);
 	}
 
-	if (arg->n_channels) {
-		if (!arg->channels)
-			return -EINVAL;
+	if (arg->n_channels > 0) {
 		if (arg->n_channels > ARRAY_SIZE(arg->channels))
 			return -EINVAL;
 
@@ -3286,9 +3282,7 @@ static int ath10k_wmi_start_scan_calc_len(struct ath10k *ar,
 		len += sizeof(__le32) * arg->n_channels;
 	}
 
-	if (arg->n_ssids) {
-		if (!arg->ssids)
-			return -EINVAL;
+	if (arg->n_ssids > 0) {
 		if (arg->n_ssids > WLAN_SCAN_PARAMS_MAX_SSID)
 			return -EINVAL;
 
@@ -3296,9 +3290,7 @@ static int ath10k_wmi_start_scan_calc_len(struct ath10k *ar,
 		len += sizeof(struct wmi_ssid) * arg->n_ssids;
 	}
 
-	if (arg->n_bssids) {
-		if (!arg->bssids)
-			return -EINVAL;
+	if (arg->n_bssids > 0) {
 		if (arg->n_bssids > WLAN_SCAN_PARAMS_MAX_BSSID)
 			return -EINVAL;
 
