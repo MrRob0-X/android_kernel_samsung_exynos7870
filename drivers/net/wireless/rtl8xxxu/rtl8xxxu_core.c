@@ -95,34 +95,40 @@ static struct ieee80211_rate rtl8xxxu_rates[] = {
 	{ .bitrate = 540, .hw_value = DESC_RATE_54M, .flags = 0 },
 };
 
+#if defined(NL80211_BAND_2GHZ)
+#define BAND_2GHZ NL80211_BAND_2GHZ
+#else
+#define BAND_2GHZ IEEE80211_BAND_2GHZ
+#endif
+
 static struct ieee80211_channel rtl8xxxu_channels_2g[] = {
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2412,
+	{ .band = BAND_2GHZ, .center_freq = 2412,
 	  .hw_value = 1, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2417,
+	{ .band = BAND_2GHZ, .center_freq = 2417,
 	  .hw_value = 2, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2422,
+	{ .band = BAND_2GHZ, .center_freq = 2422,
 	  .hw_value = 3, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2427,
+	{ .band = BAND_2GHZ, .center_freq = 2427,
 	  .hw_value = 4, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2432,
+	{ .band = BAND_2GHZ, .center_freq = 2432,
 	  .hw_value = 5, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2437,
+	{ .band = BAND_2GHZ, .center_freq = 2437,
 	  .hw_value = 6, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2442,
+	{ .band = BAND_2GHZ, .center_freq = 2442,
 	  .hw_value = 7, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2447,
+	{ .band = BAND_2GHZ, .center_freq = 2447,
 	  .hw_value = 8, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2452,
+	{ .band = BAND_2GHZ, .center_freq = 2452,
 	  .hw_value = 9, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2457,
+	{ .band = BAND_2GHZ, .center_freq = 2457,
 	  .hw_value = 10, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2462,
+	{ .band = BAND_2GHZ, .center_freq = 2462,
 	  .hw_value = 11, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2467,
+	{ .band = BAND_2GHZ, .center_freq = 2467,
 	  .hw_value = 12, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2472,
+	{ .band = BAND_2GHZ, .center_freq = 2472,
 	  .hw_value = 13, .max_power = 30 },
-	{ .band = NL80211_BAND_2GHZ, .center_freq = 2484,
+	{ .band = BAND_2GHZ, .center_freq = 2484,
 	  .hw_value = 14, .max_power = 30 }
 };
 
