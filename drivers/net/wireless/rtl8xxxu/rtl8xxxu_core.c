@@ -5986,9 +5986,9 @@ static void rtl8xxxu_c2hcmd_callback(struct work_struct *work)
 			bw = rarpt->txrate.bw;
 #else
 	#if LINUX_VERSION_CODE > KERNEL_VERSION(3,9,11)
-			bw = &priv->hw->conf.chandef.width;
+			bw = (u8)priv->hw->conf.chandef.width;
 	#else
-			bw = &priv->hw->conf.channel_type;
+			bw = (u8)priv->hw->conf.channel_type;
 	#endif
 #endif
 
