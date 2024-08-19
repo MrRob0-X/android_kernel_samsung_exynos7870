@@ -7310,9 +7310,11 @@ static void rtl8xxxu_init_led(struct rtl8xxxu_priv *priv)
 		return;
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(4,4,302)
-	led->brightness_set_blocking = priv->fops->led_classdev_brightness_set;
+    led->brightness_set_blocking = 
+        (void (*)(struct led_classdev *, enum led_brightness))priv->fops->led_classdev_brightness_set;
 #else
-	led->brightness_set = priv->fops->led_classdev_brightness_set;
+    led->brightness_set = 
+        (void (*)(struct led_classdev *, enum led_brightness))priv->fops->led_classdev_brightness_set;
 #endif
 
 	snprintf(priv->led_name, sizeof(priv->led_name),
