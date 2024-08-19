@@ -36,6 +36,8 @@
 
 #include <linux/version.h>
 
+#pragma GCC diagnostic ignored "-Wunused-function"
+
 #define DRIVER_NAME "rtl8xxxu"
 
 int rtl8xxxu_debug;
