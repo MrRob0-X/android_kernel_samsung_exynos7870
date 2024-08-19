@@ -55,8 +55,8 @@ static inline bool ether_addr_equal(const u8 *addr1, const u8 *addr2)
 	return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2])) == 0;
 		#endif
 }
-	#endif 3-5-0
-#endif 3-7-10
+	#endif
+#endif
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(3,9,11)
 #define list_first_entry_or_null(ptr, type, member) ({ \
 	struct list_head *head__ = (ptr); \
