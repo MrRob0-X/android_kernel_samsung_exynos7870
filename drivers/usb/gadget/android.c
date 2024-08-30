@@ -1720,7 +1720,10 @@ functions_store(struct device *pdev, struct device_attribute *attr,
 		name = strsep(&b, ",");
 		if (!name)
 			continue;
-if(hid_disable){
+
+        pr_info("HID is disabled, adjusting the USB functions accordingly.");
+        if(hid_disable){
+        
 	is_ffs = 0;
 }
 
@@ -1730,7 +1733,10 @@ if(hid_disable){
 		while (a) {
 			char *alias = strsep(&a, ",");
 			if (alias && !strcmp(name, alias)) {
-				if(!hid_disable){
+				
+        pr_info("HID is enabled, initializing the HID function.");
+        if(!hid_disable){
+        
 				name = "ffs";
 				} else {
 					is_ffs = 1;
@@ -1738,7 +1744,10 @@ if(hid_disable){
 				break;
 			}
 		}
-if(!hid_disable){
+
+        pr_info("HID is enabled, initializing the HID function.");
+        if(!hid_disable){
+        
 		if (ffs_enabled && !strcmp(name, "ffs"))
 			continue;
 
@@ -1759,44 +1768,39 @@ if(!hid_disable){
 }
 		err = android_enable_function(dev, name);
 
-if(!hid_disable){		
+
+        pr_info("HID is enabled, initializing the HID function.");
+        if(!hid_disable){
+        		
 		if (err) {
-			pr_err("android_usb: Cannot enable '%s' (%d)",
-												name, err);
+			pr_err("android_usb: Cannot enable '%s' (%d)", name, err);
 			continue;
 			}
 		if (!strcmp(name, "ffs"))
 			ffs_enabled = 1;
 
 		if (!strcmp(name, "hid"))
-				hid_enabled = 1;
+			hid_enabled = 1;
 } else {
 		if (err)
-			pr_err("android_usb: Cannot enable '%s' (%d)\n",
-												name, err);
+			pr_err("android_usb: Cannot enable '%s' (%d)\n", name, err);
 }
 #ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
 
 			/* Enable ACM function, if MTP is enabled. */
 			if (!strcmp(name, "mtp")) {
-				if(!hid_disable){
+			    if (!hid_disable) {  // HID is enabled
+				pr_info("HID is enabled, initializing the ACM function associated with MTP.");
 				name = "acm";
 				err = android_enable_function(dev, name);
-				} else {
-					err = android_enable_function(dev, "acm");
-				}
-				if(!hid_disable){
-					if (err) {
-						pr_err("android_usb: Cannot enable '%s' (%d)",
-									name, err);
-					}
-				} else {
-					if (err) {
-					pr_err(
-					"android_usb: Cannot enable '%s'\n",
-					name);	
-					}
-				}
+			    } else {  // HID is disabled
+				pr_info("HID is disabled, initializing the ACM function associated with MTP.");
+				err = android_enable_function(dev, "acm");
+			    }
+        
+			    if (err) {
+                                pr_err("android_usb: Cannot enable '%s' (%d)\n", name, err);
+			    }
 				
 			}
 
@@ -1806,7 +1810,10 @@ if(!hid_disable){
 #endif
 	}
 
-if(!hid_disable){
+
+        pr_info("HID is enabled, initializing the HID function.");
+        if(!hid_disable){
+        
         /* Always enable HID gadget function. */
 	if (!hid_enabled) {
 		name = "hid";
