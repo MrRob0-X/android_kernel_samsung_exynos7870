@@ -200,6 +200,5 @@ void __init of_gpio_gate_clk_setup(struct device_node *node)
 
 	of_clk_add_provider(node, of_clk_gpio_gate_delayed_register_get, data);
 }
-EXPORT_SYMBOL_GPL(of_gpio_gate_clk_setup);
 CLK_OF_DECLARE(gpio_gate_clk, "gpio-gate-clock", of_gpio_gate_clk_setup);
 #endif
