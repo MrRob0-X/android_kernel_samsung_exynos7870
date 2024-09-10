@@ -1548,7 +1548,7 @@ static int iov_resources_unassigned(struct pci_dev *dev, void *data)
 	return 0;
 }
 
-static enum enable_type pci_realloc_detect(struct pci_bus *bus,
+static enum enable_type __maybe_unused pci_realloc_detect(struct pci_bus *bus,
 			 enum enable_type enable_local)
 {
 	bool unassigned = false;

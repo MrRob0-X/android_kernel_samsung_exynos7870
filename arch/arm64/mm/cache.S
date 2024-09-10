@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2001 Deep Blue Solutions Ltd.
  * Copyright (C) 2012 ARM Ltd.
+ * Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -23,6 +24,40 @@
 #include <asm/cpufeature.h>
 #include <asm/alternative.h>
 #include <asm/uaccess.h>
+
+/*
+ *     flush_dcache_louis()
+ *
+ *     Flush the D-cache up to the Level of Unification Inner Shareable
+ *
+ *     Corrupted registers: x0-x7, x9-x11
+ */
+
+ENTRY(flush_dcache_louis)
+	dsb	sy		// ensure ordering with previous memory accesses
+	mrs	x0, clidr_el1	// read clidr
+	and	x3, x0, #(7 << 21)	// extract LoUIS from clidr
+	lsr	x3, x3, #20	// x3 = LoUIS * 2
+	cbz	x3, done	// if LoUIS is 0, then no need to clean
+	mov	x10, #0		// start clean at cache level 0
+	b	loop1		// start flushing cache levels
+done:
+	ret
+ENDPROC(flush_dcache_louis)
+
+ /*
+ *     flush_kern_cache_louis(void)
+ *
+ *     Flush the data cache up to Level of Unification Inner Shareable.
+ *     Invalidate the I-cache to the point of unification.
+ */
+ENTRY(flush_cache_louis)
+	mov	x12, lr
+	bl	flush_dcache_louis
+	mov	x0, #0
+	ic	ialluis				// I+BTB cache invalidate
+	ret x12
+ENDPROC(flush_cache_louis)
 
 /*
  *	__flush_dcache_all()
@@ -97,25 +132,7 @@ ENTRY(flush_cache_all)
 	ret	x12
 ENDPROC(flush_cache_all)
 
-ENTRY(__flush_dcache_louis)
-	dmb	ish
-	mrs	x0, clidr_el1
-	ands	x3, x0, #(7 << 21)
-	lsr	x3, x3, #20			// w3 = LoUIS * 2
-	b.eq	level_is_zero
-	mov	x10, #0
-	b	loop1				// start flushing cache
-level_is_zero:
-	ret
-ENDPROC(__flush_dcache_louis)
 
-ENTRY(flush_cache_louis)
-	mov	x12, lr
-	bl	__flush_dcache_louis
-	mov	x0, #0
-	ic	ialluis
-	ret	x12
-ENDPROC(flush_cache_louis)
 
 /*
  *	flush_icache_range(start,end)
@@ -128,6 +145,9 @@ ENDPROC(flush_cache_louis)
  *	- end     - virtual end address of region
  */
 ENTRY(flush_icache_range)
+#ifdef CONFIG_RKP_CFP_JOPP
+FALLTHROUGH(__flush_cache_user_range)
+#endif
 	/* FALLTHROUGH */
 
 /*
@@ -171,30 +191,24 @@ ENDPROC(__flush_cache_user_range)
 /*
  *	__flush_dcache_area(kaddr, size)
  *
- *	Ensure that any D-cache lines for the interval [kaddr, kaddr+size)
- *	are cleaned and invalidated to the PoC.
+ *	Ensure that the data held in the page kaddr is written back to the
+ *	page in question.
  *
  *	- kaddr   - kernel address
  *	- size    - size in question
  */
 ENTRY(__flush_dcache_area)
-	dcache_by_line_op civac, sy, x0, x1, x2, x3
+	dcache_line_size x2, x3
+	add	x1, x0, x1
+	sub	x3, x2, #1
+	bic	x0, x0, x3
+1:	dc	civac, x0			// clean & invalidate D line / unified line
+	add	x0, x0, x2
+	cmp	x0, x1
+	b.lo	1b
+	dsb	sy
 	ret
 ENDPIPROC(__flush_dcache_area)
-
-/*
- *	__clean_dcache_area_pou(kaddr, size)
- *
- * 	Ensure that any D-cache lines for the interval [kaddr, kaddr+size)
- * 	are cleaned to the PoU.
- *
- *	- kaddr   - kernel address
- *	- size    - size in question
- */
-ENTRY(__clean_dcache_area_pou)
-	dcache_by_line_op cvau, ish, x0, x1, x2, x3
-	ret
-ENDPROC(__clean_dcache_area_pou)
 
 /*
  *	__inval_cache_range(start, end)
@@ -202,6 +216,9 @@ ENDPROC(__clean_dcache_area_pou)
  *	- end     - end address of region
  */
 ENTRY(__inval_cache_range)
+#ifdef CONFIG_RKP_CFP_JOPP
+FALLTHROUGH(__dma_inv_range)
+#endif
 	/* FALLTHROUGH */
 
 /*
@@ -209,7 +226,7 @@ ENTRY(__inval_cache_range)
  *	- start   - virtual start address of region
  *	- end     - virtual end address of region
  */
-__dma_inv_range:
+ENTRY(__dma_inv_range)
 	dcache_line_size x2, x3
 	sub	x3, x2, #1
 	tst	x1, x3				// end cache line aligned?
@@ -235,7 +252,7 @@ ENDPROC(__dma_inv_range)
  *	- start   - virtual start address of region
  *	- end     - virtual end address of region
  */
-__dma_clean_range:
+ENTRY(__dma_clean_range)
 	dcache_line_size x2, x3
 	sub	x3, x2, #1
 	bic	x0, x0, x3

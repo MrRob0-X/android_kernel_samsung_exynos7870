@@ -73,10 +73,18 @@ obj-$(CONFIG_BCM43456) += bcmdhd_100_15/
 obj-$(CONFIG_BCM43456) += bcmdhd_100_15/dhd_custom_memprealloc.o
 obj-$(CONFIG_BCM43456) += bcmdhd_100_15/dhd_custom_exynos.o
 
-obj-$(CONFIG_BRCMFMAC)	+= brcm80211/
-obj-$(CONFIG_BRCMSMAC)	+= brcm80211/
-obj-$(CONFIG_CNSS_SDIO)	+= cnss/cnss_sdio.o
-obj-$(CONFIG_WCNSS_MEM_PRE_ALLOC) += cnss_prealloc.o
-obj-$(CONFIG_QCA_CLD_WLAN)  += qcacld-2.0/
+obj-$(CONFIG_BRCMFMAC)  += brcm80211/
+obj-$(CONFIG_BRCMSMAC)  += brcm80211/
+
 obj-$(CONFIG_CW1200)	+= cw1200/
 obj-$(CONFIG_RSI_91X)	+= rsi/
+
+obj-$(CONFIG_WCNSS_CORE)	+= wcnss/
+
+obj-$(CONFIG_CNSS)	+= cnss/
+obj-$(CONFIG_CNSS2)	+= cnss2/
+obj-$(CONFIG_CNSS_SDIO)	+= cnss/cnss_sdio.o
+obj-$(CONFIG_WCNSS_MEM_PRE_ALLOC) += cnss_prealloc/
+obj-$(CONFIG_CNSS_CRYPTO)	+= cnss_crypto/
+obj-$(CONFIG_CNSS_UTILS) += cnss_utils/
+obj-$(CONFIG_QCA_CLD_WLAN)  += qcacld-2.0/
