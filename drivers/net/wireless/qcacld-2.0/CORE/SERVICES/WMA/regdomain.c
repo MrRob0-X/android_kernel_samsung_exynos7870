@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011,2013-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011,2013-2014, 2018-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -361,7 +361,7 @@ int32_t regdmn_get_country_alpha2(struct regulatory *reg)
 /*
  * Returns regulatory domain for given country string
  */
-int32_t regdmn_get_regdmn_for_country(u_int8_t *alpha2)
+uint16 regdmn_get_regdmn_for_country(const u_int8_t *alpha2)
 {
 	u_int8_t i;
 
@@ -370,7 +370,52 @@ int32_t regdmn_get_regdmn_for_country(u_int8_t *alpha2)
 		    (ol_regdmn_Rdt.allCountries[i].isoName[1] == alpha2[1]))
 			return ol_regdmn_Rdt.allCountries[i].regDmnEnum;
 	}
-	return -1;
+	return 0;
+}
+
+void regdmn_map_country_to_vos_regdmn(const unsigned char *alpha2,
+				      v_REGDOMAIN_t *vos_regdmn)
+{
+	uint16 regdmn_enum, regdmn_5g;
+	uint8 ctl_5g;
+
+	*vos_regdmn = REGDOMAIN_COUNT;
+
+	regdmn_enum = regdmn_get_regdmn_for_country(alpha2);
+
+	if (regdmn_enum == 0) {
+		adf_os_print("%s: get regdmn for %s failed\n", __func__, alpha2);
+		return;
+	}
+
+	regdmn_5g = get_regdmn_5g(regdmn_enum);
+
+	if (regdmn_5g == 0) {
+		adf_os_print("%s: get 5g regdmn for %s failed\n", __func__, alpha2);
+		return;
+	}
+
+	ctl_5g = regdmn_get_ctl_for_regdmn(regdmn_5g);
+
+	if (ctl_5g == 0) {
+		adf_os_print("%s: get 5g ctl for %s failed\n", __func__, alpha2);
+		return;
+	}
+
+	switch (ctl_5g) {
+		case FCC:
+			*vos_regdmn = REGDOMAIN_FCC;
+			break;
+		case ETSI:
+			*vos_regdmn = REGDOMAIN_ETSI;
+			break;
+		case MKK:
+			*vos_regdmn = REGDOMAIN_JAPAN;
+			break;
+		default:
+			adf_os_print("%s: vos regdmn for %s is unset\n", __func__, alpha2);
+			break;
+	}
 }
 
 /*
@@ -616,7 +661,7 @@ u_int8_t regdmn_get_ctl_for_regdmn(u_int32_t reg_dmn)
             return ol_regdmn_Rdt.regDomains[i].conformance_test_limit;
       }
    }
-   return -1;
+   return 0;
 }
 
 /*
@@ -635,6 +680,40 @@ u_int16_t get_regdmn_5g(u_int32_t reg_dmn)
 	}
 	adf_os_print("%s: invalid regulatory domain/country code 0x%x\n",
 		     __func__, reg_dmn);
+	return 0;
+}
+
+/*
+ *  Get channel width from a given operating class
+ */
+u_int16_t regdm_get_chanwidth_from_opclass(u_int8_t *country, u_int8_t channel,
+       u_int8_t opclass)
+{
+	regdm_op_class_map_t *class = NULL;
+	u_int16_t i;
+
+	if (0 == adf_os_mem_cmp(country,"US", 2)) {
+		class = us_op_class;
+	} else if (0 == adf_os_mem_cmp(country,"EU", 2)) {
+		class = euro_op_class;
+	} else if (0 == adf_os_mem_cmp(country,"JP", 2)) {
+		class = japan_op_class;
+	} else {
+		class = global_op_class;
+	}
+
+	while (class->op_class) {
+		if (opclass == class->op_class) {
+			for (i = 0;
+			        (i < MAX_CHANNELS_PER_OPERATING_CLASS &&
+			         class->channels[i]);
+			         i++) {
+				if (channel == class->channels[i])
+					return class->ch_spacing;
+			}
+		}
+		class++;
+	}
 	return 0;
 }
 
@@ -670,6 +749,44 @@ u_int16_t regdm_get_opclass_from_channel(u_int8_t *country, u_int8_t channel,
 		class++;
 	}
 	return 0;
+}
+
+/*
+ * Get channel list for a given regulatory class
+ */
+void regdm_get_channel_from_opclass(u_int8_t *country,
+	u_int8_t op_class)
+{
+	regdm_op_class_map_t *class = NULL;
+	u_int16_t i = 0;
+
+	if (0 == adf_os_mem_cmp(country,"US", 2)) {
+		class = us_op_class;
+	} else if (0 == adf_os_mem_cmp(country,"EU", 2)) {
+		class = euro_op_class;
+	} else if (0 == adf_os_mem_cmp(country,"JP", 2)) {
+		class = japan_op_class;
+	} else {
+		class = global_op_class;
+	}
+
+	while (class->op_class) {
+		if (class->op_class == op_class) {
+			for (i = 0;
+			     (i < MAX_CHANNELS_PER_OPERATING_CLASS &&
+			      class->channels[i]);
+			     i++) {
+				adf_os_print(KERN_ERR
+				"%s: Valid channel(%d) in requested RC(%d)\n",
+				__func__, class->channels[i], op_class);
+			}
+			break;
+		}
+		class++;
+	}
+	if (!class->op_class)
+		adf_os_print(KERN_ERR "%s: Invalid requested RC (%d)\n",
+			     __func__, op_class);
 }
 
 /*

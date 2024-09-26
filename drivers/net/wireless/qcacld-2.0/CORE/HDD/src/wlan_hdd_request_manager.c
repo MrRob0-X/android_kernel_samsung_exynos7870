@@ -22,7 +22,6 @@
 #include "vos_list.h"
 #include "vos_event.h"
 #include "vos_memory.h"
-#include "vos_utils.h"
 
 /* arbitrary value */
 #define MAX_NUM_REQUESTS 20

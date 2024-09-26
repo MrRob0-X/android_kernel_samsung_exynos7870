@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -38,6 +38,7 @@
 #define BSS_OPERATIONAL_MODE_AP     0
 #define BSS_OPERATIONAL_MODE_STA    1
 #define BSS_OPERATIONAL_MODE_IBSS   2
+#define BSS_OPERATIONAL_MODE_NDI    3
 
 /* STA entry type in add sta message */
 #define STA_ENTRY_SELF              0
@@ -48,6 +49,7 @@
 #ifdef FEATURE_WLAN_TDLS
 #define STA_ENTRY_TDLS_PEER         4
 #endif /* FEATURE_WLAN_TDLS */
+#define STA_ENTRY_NDI_PEER          5
 
 #define STA_ENTRY_TRANSMITTER       STA_ENTRY_SELF
 #define STA_ENTRY_RECEIVER          STA_ENTRY_OTHER
@@ -312,6 +314,7 @@ typedef struct
     tANI_U8  nonRoamReassoc;
     uint32_t nss; /* Number of spatial streams supported */
     tANI_U8  max_amsdu_num;
+    uint8_t  channelwidth;
 } tAddStaParams, *tpAddStaParams;
 
 
@@ -540,6 +543,10 @@ typedef struct
     uint8_t wps_state;
     uint8_t nss_2g;
     uint8_t nss_5g;
+    uint32_t tx_aggregation_size;
+    uint32_t rx_aggregation_size;
+    uint16_t beacon_tx_rate;
+    uint8_t  channelwidth;
 } tAddBssParams, * tpAddBssParams;
 
 typedef struct
@@ -738,23 +745,19 @@ typedef struct {
 
 #ifdef FEATURE_OEM_DATA_SUPPORT
 
-#ifndef OEM_DATA_REQ_SIZE
-#define OEM_DATA_REQ_SIZE 280
-#endif
-#ifndef OEM_DATA_RSP_SIZE
-#define OEM_DATA_RSP_SIZE 1724
-#endif
-
 typedef struct
 {
     tSirMacAddr          selfMacAddr;
     eHalStatus           status;
-    tANI_U8              oemDataReq[OEM_DATA_REQ_SIZE];
+    uint32_t             data_len;
+    uint8_t              *data;
 } tStartOemDataReq, *tpStartOemDataReq;
 
 typedef struct
 {
-    tANI_U8             oemDataRsp[OEM_DATA_RSP_SIZE];
+    bool                target_rsp;
+    uint32_t            rsp_len;
+    uint8_t             *oem_data_rsp;
 } tStartOemDataRsp, *tpStartOemDataRsp;
 #endif
 
@@ -924,7 +927,8 @@ typedef struct
 #ifdef WLAN_FEATURE_11AC
 typedef struct
 {
-   tANI_U16   opMode;
+   tANI_U16  opMode;
+   tANI_U16  chanMode;
    tANI_U16  staId;
    tANI_U16  smesessionId;
    tSirMacAddr peer_mac;
@@ -955,24 +959,6 @@ typedef struct
 }tUpdateUserPos, *tpUpdateUserPos;
 
 #endif
-
-//HAL MSG: SIR_HAL_UPDATE_CF_IND
-typedef struct
-{
-
-    tANI_U8  bssIdx;
-
-    /*
-    * cfpCount indicates how many DTIMs (including the current frame) appear before the next CFP start.
-    * A CFPCount of 0 indicates that the current DTIM marks the start of the CFP.
-    */
-    tANI_U8  cfpCount;
-
-    /* cfpPeriod indicates the number of DTIM intervals between the start of CFPs. */
-    tANI_U8 cfpPeriod;
-
-}tUpdateCFParams, *tpUpdateCFParams;
-
 
 
 //HAL MSG: SIR_HAL_UPDATE_DTIM_IND
@@ -1021,6 +1007,8 @@ typedef struct
      * by way of ignoring if using new host/old FW or old host/new FW since it is at the end of this struct
      */
     tSirMacAddr bssId;
+    uint8_t ssidHidden;
+    tSirMacSSid ssid;
 
     eHalStatus status;
 
@@ -1035,6 +1023,11 @@ typedef struct
     tANI_U8  dot11_mode;
 
     uint8_t restart_on_chan_switch;
+
+    uint32_t channelwidth;
+
+    uint16_t reduced_beacon_interval;
+    uint16_t beacon_tx_rate;
 }tSwitchChannelParams, *tpSwitchChannelParams;
 
 typedef struct CSAOffloadParams {
@@ -1042,10 +1035,15 @@ typedef struct CSAOffloadParams {
    tANI_U8 switchmode;
    tANI_U8 sec_chan_offset;
    tANI_U8 new_ch_width;       /* New channel width */
+   tANI_U8 new_op_class;       /* New operating class */
    tANI_U8 new_ch_freq_seg1;   /* Channel Center frequency 1 */
    tANI_U8 new_ch_freq_seg2;   /* Channel Center frequency 2 */
+   tANI_U8 new_sub20_channelwidth;  /* 5MHz or 10Mhz channel width */
    tANI_U32 ies_present_flag;   /* WMI_CSA_EVENT_IES_PRESENT_FLAG */
    tSirMacAddr bssId;
+#ifdef WLAN_FEATURE_SAP_TO_FOLLOW_STA_CHAN
+   tANI_U32 csa_tbtt_count;
+#endif//#ifdef WLAN_FEATURE_SAP_TO_FOLLOW_STA_CHAN
 }*tpCSAOffloadParams, tCSAOffloadParams;
 
 typedef void (*tpSetLinkStateCallback)(tpAniSirGlobal pMac, void *msgParam,
@@ -1131,102 +1129,6 @@ typedef struct
 
 eHalStatus halMsg_setPromiscMode(tpAniSirGlobal pMac);
 
-
-//
-// Mesg header is used from tSirMsgQ
-// Mesg Type = SIR_HAL_ADDBA_REQ
-//
-typedef struct sAddBAParams
-{
-
-    // Station Index
-    tANI_U16 staIdx;
-
-    // Peer MAC Address
-    tSirMacAddr peerMacAddr;
-
-    // ADDBA Action Frame dialog token
-    // HAL will not interpret this object
-    tANI_U8 baDialogToken;
-
-    // TID for which the BA is being setup
-    // This identifies the TC or TS of interest
-    tANI_U8 baTID;
-
-    // 0 - Delayed BA (Not supported)
-    // 1 - Immediate BA
-    tANI_U8 baPolicy;
-
-    // Indicates the number of buffers for this TID (baTID)
-    // NOTE - This is the requested buffer size. When this
-    // is processed by HAL and subsequently by HDD, it is
-    // possible that HDD may change this buffer size. Any
-    // change in the buffer size should be noted by PE and
-    // advertized appropriately in the ADDBA response
-    tANI_U16 baBufferSize;
-
-    // BA timeout in TU's
-    // 0 means no timeout will occur
-    tANI_U16 baTimeout;
-
-    // b0..b3 - Fragment Number - Always set to 0
-    // b4..b15 - Starting Sequence Number of first MSDU
-    // for which this BA is setup
-    tANI_U16 baSSN;
-
-    // ADDBA direction
-    // 1 - Originator
-    // 0 - Recipient
-    tANI_U8 baDirection;
-
-    //
-    // Following parameters are for returning status from
-    // HAL to PE via response message. HAL does not read them
-    //
-    // The return status of SIR_HAL_ADDBA_REQ is reported
-    // in the SIR_HAL_ADDBA_RSP message
-    eHalStatus status;
-
-    // Indicating to HAL whether a response message is required.
-    tANI_U8 respReqd;
-    tANI_U8    sessionId; // PE session id for PE<->HAL interface
-                          //  HAL Sends back the PE session
-                          //  id unmodified
-
-} tAddBAParams, * tpAddBAParams;
-
-
-//
-// Mesg header is used from tSirMsgQ
-// Mesg Type = SIR_HAL_DELBA_IND
-//
-typedef struct sDelBAParams
-{
-
-    // Station Index
-    tANI_U16 staIdx;
-
-    // TID for which the BA session is being deleted
-    tANI_U8 baTID;
-
-    // DELBA direction
-    // 1 - Originator
-    // 0 - Recipient
-    tANI_U8 baDirection;
-
-    // FIXME - Do we need a response for this?
-    // Maybe just the IND/REQ will suffice?
-    //
-    // Following parameters are for returning status from
-    // HAL to PE via response message. HAL does not read them
-    //
-    // The return status of SIR_HAL_DELBA_REQ is reported
-    // in the SIR_HAL_DELBA_RSP message
-    //eHalStatus status;
-
-} tDelBAParams, * tpDelBAParams;
-
-
 //
 // Mesg header is used from tSirMsgQ
 // Mesg Type = SIR_HAL_SET_MIMOPS_REQ
@@ -1286,44 +1188,6 @@ typedef struct sExitUapsdParams
     eHalStatus  status;
     tANI_U8     bssIdx;
 }tExitUapsdParams, *tpExitUapsdParams;
-
-//
-// Mesg header is used from tSirMsgQ
-// Mesg Type = SIR_LIM_DEL_BA_IND
-//
-typedef struct sBADeleteParams
-{
-
-    // Station Index
-    tANI_U16 staIdx;
-
-    // Peer MAC Address, whose BA session has timed out
-    tSirMacAddr peerMacAddr;
-
-    // TID for which a BA session timeout is being triggered
-    tANI_U8 baTID;
-
-    // DELBA direction
-    // 1 - Originator
-    // 0 - Recipient
-    tANI_U8 baDirection;
-
-    tANI_U32 reasonCode;
-
-    tSirMacAddr  bssId; // TO SUPPORT BT-AMP
-                        // HAL copies the sta bssid to this.
-} tBADeleteParams, * tpBADeleteParams;
-
-
-// Mesg Type = SIR_LIM_ADD_BA_IND
-typedef struct sBaActivityInd
-{
-    tANI_U16 baCandidateCnt;
-    //baCandidateCnt is followed by BA Candidate List ( tAddBaCandidate)
-
-    tSirMacAddr  bssId; // TO SUPPORT BT-AMP
-} tBaActivityInd, * tpBaActivityInd;
-
 
 // Mesg Type = SIR_LIM_IBSS_PEER_INACTIVITY_IND
 typedef struct sIbssPeerInactivityInd
@@ -1432,6 +1296,17 @@ typedef struct sAddStaSelfParams
    tANI_U16        pkt_err_disconn_th;
    uint8_t         nss_2g;
    uint8_t         nss_5g;
+   uint32_t        tx_aggregation_size;
+   uint32_t        rx_aggregation_size;
+   uint32_t tx_aggr_sw_retry_threshhold_be;
+   uint32_t tx_aggr_sw_retry_threshhold_bk;
+   uint32_t tx_aggr_sw_retry_threshhold_vi;
+   uint32_t tx_aggr_sw_retry_threshhold_vo;
+   uint32_t tx_non_aggr_sw_retry_threshhold_be;
+   uint32_t tx_non_aggr_sw_retry_threshhold_bk;
+   uint32_t tx_non_aggr_sw_retry_threshhold_vi;
+   uint32_t tx_non_aggr_sw_retry_threshhold_vo;
+   bool            enable_bcast_probe_rsp;
 }tAddStaSelfParams, *tpAddStaSelfParams;
 
 /**
@@ -1633,6 +1508,137 @@ struct hal_apfind_request
 {
     u_int16_t request_data_len;
     u_int8_t  request_data[];
+};
+#endif
+
+struct hal_mnt_filter_type_request
+{
+    u_int32_t vdev_id;
+    u_int16_t request_data_len;
+    u_int8_t  request_data[];
+};
+
+struct hal_thermal_mgmt_cmd_params
+{
+    tANI_U16 min_temp;
+    tANI_U16 max_temp;
+    tANI_U8 enable;
+};
+
+/**
+ * @struct hal_tt_level_config - Set Thermal throttlling config
+ * @tmplwm: Temperature low water mark
+ * @tmphwm: Temperature high water mark
+ * @dcoffpercent: dc off percentage
+ * @priority: priority
+ */
+typedef struct
+{
+    uint32_t tmplwm;
+    uint32_t tmphwm;
+    uint32_t dcoffpercent;
+    uint32_t priority;
+} hal_tt_level_config;
+
+/**
+ * struct hal_thermal_mitigation_params - Thermal mitigation params
+ * @enable: Enable/Disable Thermal mitigation
+ * @dc: DC
+ * @dc_per_event: DC per event
+ * @tt_level_config: TT level config params
+ */
+struct hal_thermal_mitigation_params
+{
+    tANI_U32 pdev_id;
+    bool enable;
+    tANI_U32 dc;
+    tANI_U32 dc_per_event;
+    hal_tt_level_config level_conf[WLAN_WMA_MAX_THERMAL_LEVELS];
+};
+
+struct hal_hpcs_pulse_params
+{
+    tANI_U32 vdev_id;
+    tANI_U32 start;
+    tANI_U32 sync_time;
+    tANI_U32 pulse_interval;
+    tANI_U32 active_sync_period;
+    tANI_U32 gpio_pin;
+    tANI_U32 pulse_width;
+};
+
+/**
+ * strcut hal_primary_params - Set primary peer
+ * @vdev_id: Vdev ID
+ * @bssid: MAC address for the primary peer
+ */
+struct hal_primary_params {
+	uint8_t session_id;
+	tSirMacAddr bssid;
+};
+
+/**
+ * struct hal_gpio_cfg - GPIO config paramters
+ * @gpio_num: GPIO number to be setup
+ * @input: 0 - Output/ 1 - Input
+ * @pull_type: Pull type
+ * @intr_mode: Interrupt mode
+ * @mux_config_val: mux_config_val
+ */
+struct hal_gpio_cfg {
+	uint32_t gpio_num;
+	uint32_t input;
+	uint32_t pull_type;
+	uint32_t intr_mode;
+	uint32_t mux_config_val;
+};
+
+/**
+ * struct hal_gpio_output - GPIO output parameters
+ * @gpio_num: GPIO number to be setup
+ * @set:  Set the GPIO pin
+ */
+struct hal_gpio_output {
+	uint32_t gpio_num;
+	uint32_t set;
+};
+
+#ifdef AUDIO_MULTICAST_AGGR_SUPPORT
+#define MAX_GROUP_NUM        5
+#define MAX_CLIENT_NUM       10
+#define MAX_NUM_RATE_SET     4
+#define MAX_RETRY_LIMIT      MAX_NUM_RATE_SET-1
+
+struct audio_multicast_rate
+{
+    uint32_t mcs;
+    uint32_t bandwith;
+};
+
+/** 2 word representation of MAC addr */
+struct mac_addr_s {
+    uint32_t mac_addr31to0;
+    uint32_t mac_addr47to32;
+};
+
+struct audio_multicast_group
+{
+    uint8_t group_id;
+    uint8_t in_use;
+    uint32_t client_num;
+    uint32_t retry_limit;
+    uint32_t num_rate_set;
+    struct audio_multicast_rate rate_set[MAX_NUM_RATE_SET];
+    struct mac_addr_s multicast_addr;
+    struct mac_addr_s client_addr[MAX_CLIENT_NUM];
+};
+
+struct audio_multicast_aggr
+{
+    uint32_t aggr_enable;
+    uint32_t tbd_enable;
+    uint8_t group_num;
+    struct audio_multicast_group multicast_group[MAX_GROUP_NUM];
 };
 #endif
 

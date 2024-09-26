@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011, 2014, 2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -42,6 +42,7 @@
 #ifdef QCA_ARP_SPOOFING_WAR
 #include <ol_if_athvar.h>
 #endif
+#include "ol_tx.h"
 
 
 /*
@@ -132,7 +133,6 @@ ol_rx_fwd_to_tx(struct ol_txrx_vdev_t *vdev, adf_nbuf_t msdu)
      * Map the netbuf, so it's accessible to the DMA that
      * sends it to the target.
      */
-    adf_nbuf_map_single(pdev->osdev, msdu, ADF_OS_DMA_TO_DEVICE);
     adf_nbuf_set_next(msdu, NULL); /* add NULL terminator */
 
     /* for HL, point to payload before send to tx again.*/
@@ -143,6 +143,7 @@ ol_rx_fwd_to_tx(struct ol_txrx_vdev_t *vdev, adf_nbuf_t msdu)
         adf_nbuf_pull_head(msdu,
                 htt_rx_msdu_rx_desc_size_hl(pdev->htt_pdev,
                     rx_desc));
+        adf_nbuf_set_fwd_flag(msdu, ADF_NBUF_FWD_FLAG);
     }
 
     msdu = vdev->tx(vdev, msdu);
@@ -153,8 +154,7 @@ ol_rx_fwd_to_tx(struct ol_txrx_vdev_t *vdev, adf_nbuf_t msdu)
          * We could store the frame and try again later,
          * but the simplest solution is to discard the frames.
          */
-        adf_nbuf_unmap_single(pdev->osdev, msdu, ADF_OS_DMA_TO_DEVICE);
-        adf_nbuf_free(msdu);
+        adf_nbuf_tx_free(msdu, ADF_NBUF_PKT_ERROR);
     }
 }
 
@@ -229,37 +229,13 @@ ol_rx_fwd_check(
              * in which case we need to make a copy (or clone?).
              */
             if (!do_not_fwd) {
-                u_int16_t off = 0;
-                // for HL, point to payload right now
-                if (pdev->cfg.is_high_latency) {
-                    off = htt_rx_msdu_rx_desc_size_hl(pdev->htt_pdev,
-                                                      rx_desc);
-                }
-
-                /*
-                 * CR 2868053
-                 * discard EAPOL frame for intrabss forwarding
-                 */
-                if ((vdev->opmode == wlan_op_mode_ap) &&
-                    adf_nbuf_data_is_eapol_pkt(adf_nbuf_data(msdu) + off)) {
-                    VOS_TRACE(VOS_MODULE_ID_TXRX, VOS_TRACE_LEVEL_ERROR,
-                        "\n%s:QSV2020005 EAPOL forwarding discard \n",
-                        __FUNCTION__);
-                    /* Drop the packet*/
-                    htt_rx_msdu_desc_free(pdev->htt_pdev, msdu);
-                    TXRX_STATS_MSDU_LIST_INCR(
-                        pdev, tx.dropped.host_reject, msdu);
-                    /* add NULL terminator */
-                    adf_nbuf_set_next(msdu, NULL);
-                    adf_nbuf_tx_free(msdu, 1);
-                    msdu = msdu_list;
-                    continue;
-                }
-
                 if (htt_rx_msdu_discard(pdev->htt_pdev, rx_desc)) {
                         htt_rx_msdu_desc_free(pdev->htt_pdev, msdu);
+                        adf_net_buf_debug_release_skb(msdu);
                         ol_rx_fwd_to_tx(tx_vdev, msdu);
                         msdu = NULL; /* already handled this MSDU */
+                        tx_vdev->fwd_tx_packets++;
+                        vdev->fwd_rx_packets++;
                         TXRX_STATS_ADD(pdev, pub.rx.intra_bss_fwd.packets_fwd,
                                 1);
                 } else {
@@ -267,6 +243,7 @@ ol_rx_fwd_check(
                         copy = adf_nbuf_copy(msdu);
                         if (copy) {
                             ol_rx_fwd_to_tx(tx_vdev, copy);
+                            tx_vdev->fwd_tx_packets++;
                         }
                         TXRX_STATS_ADD(pdev,
                                 pub.rx.intra_bss_fwd.packets_stack_n_fwd, 1);
@@ -290,3 +267,29 @@ ol_rx_fwd_check(
         }
     }
 }
+
+/*
+ * ol_get_intra_bss_fwd_pkts_count() - to get the total tx and rx packets
+ * that has been forwarded from txrx layer without going to upper layers.
+ *
+ * @vdev_id: vdev id
+ * @fwd_tx_packets: pointer to forwarded tx packets count parameter
+ * @fwd_rx_packets: pointer to forwarded rx packets count parameter
+ *
+ * Return: status -> A_OK - success, A_ERROR - failure
+ *
+ */
+A_STATUS ol_get_intra_bss_fwd_pkts_count(uint8_t vdev_id,
+		unsigned long *fwd_tx_packets, unsigned long *fwd_rx_packets)
+{
+	struct ol_txrx_vdev_t *vdev = NULL;
+
+	vdev = (struct ol_txrx_vdev_t *)ol_txrx_get_vdev_from_vdev_id(vdev_id);
+	if (!vdev)
+		return A_ERROR;
+
+	*fwd_tx_packets = vdev->fwd_tx_packets;
+	*fwd_rx_packets = vdev->fwd_rx_packets;
+	return A_OK;
+}
+

@@ -107,8 +107,6 @@ void sme_FTClose(tHalHandle hHal, tANI_U32 sessionId)
       }
 
       if (pSession->ftSmeContext.pUsrCtx != NULL) {
-          smsLog(pMac, LOG1,
-                 FL("Freeing ftSmeContext.pUsrCtx and setting to NULL"));
           vos_mem_free(pSession->ftSmeContext.pUsrCtx);
           pSession->ftSmeContext.pUsrCtx = NULL;
       }
@@ -215,7 +213,7 @@ void sme_SetFTIEs(tHalHandle hHal, tANI_U32 sessionId, const tANI_U8 *ft_ies,
 
          // At this juncture we are ready to start sending Re-Assoc Req.
 #if defined WLAN_FEATURE_VOWIFI_11R_DEBUG
-         smsLog( pMac, LOG1, "New Reassoc Req=%p in state %d",
+         smsLog( pMac, LOG1, "New Reassoc Req=%pK in state %d",
                ft_ies, pSession->ftSmeContext.FTState);
 #endif
          if ((pSession->ftSmeContext.reassoc_ft_ies) &&
@@ -265,13 +263,9 @@ eHalStatus sme_FTSendUpdateKeyInd(tHalHandle hHal, tANI_U32 sessionId,
    tSirKeyMaterial *keymaterial = NULL;
    tAniEdType edType;
    tpAniSirGlobal pMac = PMAC_STRUCT( hHal );
+
 #if defined WLAN_FEATURE_VOWIFI_11R_DEBUG
-   int i = 0;
-
    smsLog(pMac, LOG1, FL("keyLength %d"), pFTKeyInfo->keyLength);
-
-   for (i=0; i<pFTKeyInfo->keyLength; i++)
-      smsLog(pMac, LOG1, FL("%02x"), pFTKeyInfo->Key[i]);
 #endif
 
    if(pFTKeyInfo->keyLength > CSR_MAX_KEY_LEN)
@@ -318,24 +312,7 @@ eHalStatus sme_FTSendUpdateKeyInd(tHalHandle hHal, tANI_U32 sessionId,
    keymaterial->key[ 0 ].keyLength = pFTKeyInfo->keyLength;
 
    if (pFTKeyInfo->keyLength)
-   {
       vos_mem_copy(&keymaterial->key[ 0 ].key, pFTKeyInfo->Key, pFTKeyInfo->keyLength);
-      if(pFTKeyInfo->keyLength == 16)
-      {
-         smsLog(pMac, LOG1,
-         "SME Set Update Ind keyIdx (%d) encType(%d) key = "
-         "%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X",
-         pMsg->keyMaterial.key[0].keyId, (tAniEdType)pMsg->keyMaterial.edType,
-         pMsg->keyMaterial.key[0].key[0], pMsg->keyMaterial.key[0].key[1],
-         pMsg->keyMaterial.key[0].key[2], pMsg->keyMaterial.key[0].key[3],
-         pMsg->keyMaterial.key[0].key[4], pMsg->keyMaterial.key[0].key[5],
-         pMsg->keyMaterial.key[0].key[6], pMsg->keyMaterial.key[0].key[7],
-         pMsg->keyMaterial.key[0].key[8], pMsg->keyMaterial.key[0].key[9],
-         pMsg->keyMaterial.key[0].key[10], pMsg->keyMaterial.key[0].key[11],
-         pMsg->keyMaterial.key[0].key[12], pMsg->keyMaterial.key[0].key[13],
-         pMsg->keyMaterial.key[0].key[14], pMsg->keyMaterial.key[0].key[15]);
-      }
-   }
 
    vos_mem_copy( &pMsg->bssId[ 0 ],
          &pFTKeyInfo->peerMac[ 0 ],
@@ -584,7 +561,7 @@ void sme_FTReset(tHalHandle hHal, tANI_U32 sessionId)
    if (NULL != pSession) {
       if (pSession->ftSmeContext.auth_ft_ies != NULL) {
 #if defined WLAN_FEATURE_VOWIFI_11R_DEBUG
-          smsLog(pMac, LOG1, FL("Freeing FT Auth IE %p and setting to NULL"),
+          smsLog(pMac, LOG1, FL("Freeing FT Auth IE %pK and setting to NULL"),
                 pSession->ftSmeContext.auth_ft_ies);
 #endif
          vos_mem_free(pSession->ftSmeContext.auth_ft_ies);
@@ -595,7 +572,7 @@ void sme_FTReset(tHalHandle hHal, tANI_U32 sessionId)
       if (pSession->ftSmeContext.reassoc_ft_ies != NULL) {
 #if defined WLAN_FEATURE_VOWIFI_11R_DEBUG
           smsLog(pMac, LOG1,
-                 FL("Freeing FT Reassoc IE %p and setting to NULL"),
+                 FL("Freeing FT Reassoc IE %pK and setting to NULL"),
                  pSession->ftSmeContext.reassoc_ft_ies);
 #endif
          vos_mem_free(pSession->ftSmeContext.reassoc_ft_ies);
@@ -605,7 +582,7 @@ void sme_FTReset(tHalHandle hHal, tANI_U32 sessionId)
 
       if (pSession->ftSmeContext.psavedFTPreAuthRsp != NULL) {
 #if defined WLAN_FEATURE_VOWIFI_11R_DEBUG
-          smsLog( pMac, LOG1, FL("Freeing FtPreAuthRsp %p and setting to NULL"),
+          smsLog( pMac, LOG1, FL("Freeing FtPreAuthRsp %pK and setting to NULL"),
                 pSession->ftSmeContext.psavedFTPreAuthRsp);
 #endif
           vos_mem_free(pSession->ftSmeContext.psavedFTPreAuthRsp);

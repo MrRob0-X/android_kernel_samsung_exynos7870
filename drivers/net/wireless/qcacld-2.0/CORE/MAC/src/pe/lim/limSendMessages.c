@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, 2016-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -70,64 +70,6 @@ static tBeaconFilterIe beaconFilterTable[] = {
    ,{SIR_MAC_VHT_OPERATION_EID,  0,  {0, 0, VHTOP_CHWIDTH_MASK, 0}}
 #endif
 };
-
-/**
- * limSendCFParams()
- *
- *FUNCTION:
- * This function is called to send CFP Parameters to WDA, when they are changed.
- *
- *LOGIC:
- *
- *ASSUMPTIONS:
- * NA
- *
- *NOTE:
- * NA
- *
- * @param pMac  pointer to Global Mac structure.
- * @param bssIdx Bss Index of the BSS to which STA is associated.
- * @param cfpCount CFP Count, if that is changed.
- * @param cfpPeriod CFP Period if that is changed.
- *
- * @return success if message send is ok, else false.
- */
-tSirRetStatus limSendCFParams(tpAniSirGlobal pMac, tANI_U8 bssIdx, tANI_U8 cfpCount, tANI_U8 cfpPeriod)
-{
-    tpUpdateCFParams pCFParams = NULL;
-    tSirRetStatus   retCode = eSIR_SUCCESS;
-    tSirMsgQ msgQ;
-
-    pCFParams = vos_mem_malloc(sizeof( tUpdateCFParams ));
-    if ( NULL == pCFParams )
-      {
-        limLog( pMac, LOGP,
-            FL( "Unable to allocate memory during Update CF Params" ));
-        retCode = eSIR_MEM_ALLOC_FAILED;
-        goto returnFailure;
-      }
-    vos_mem_set( (tANI_U8 *) pCFParams, sizeof(tUpdateCFParams), 0);
-    pCFParams->cfpCount = cfpCount;
-    pCFParams->cfpPeriod = cfpPeriod;
-    pCFParams->bssIdx     = bssIdx;
-
-    msgQ.type = WDA_UPDATE_CF_IND;
-    msgQ.reserved = 0;
-    msgQ.bodyptr = pCFParams;
-    msgQ.bodyval = 0;
-    limLog( pMac, LOG3,
-                FL( "Sending WDA_UPDATE_CF_IND..." ));
-    MTRACE(macTraceMsgTx(pMac, NO_SESSION, msgQ.type));
-    if( eSIR_SUCCESS != (retCode = wdaPostCtrlMsg( pMac, &msgQ )))
-    {
-        vos_mem_free(pCFParams);
-        limLog( pMac, LOGP,
-                    FL("Posting  WDA_UPDATE_CF_IND to WDA failed, reason=%X"),
-                    retCode );
-    }
-returnFailure:
-    return retCode;
-}
 
 /**
  * limSendBeaconParams()
@@ -235,6 +177,7 @@ tSirRetStatus limSendSwitchChnlParams(tpAniSirGlobal pMac,
     tSirRetStatus   retCode = eSIR_SUCCESS;
     tSirMsgQ msgQ;
     tpPESession pSessionEntry;
+
     if((pSessionEntry = peFindSessionBySessionId(pMac, peSessionId)) == NULL)
     {
        limLog( pMac, LOGP,
@@ -270,7 +213,35 @@ tSirRetStatus limSendSwitchChnlParams(tpAniSirGlobal pMac,
        pChnlParams->isDfsChannel = VOS_FALSE;
 
     pChnlParams->restart_on_chan_switch = is_restart;
+    pChnlParams->reduced_beacon_interval =
+       pMac->sap.SapDfsInfo.reduced_beacon_interval;
+    pChnlParams->beacon_tx_rate = pSessionEntry->beacon_tx_rate;
 
+    if (pSessionEntry->sub20_channelwidth == SUB20_MODE_5MHZ)
+            pChnlParams->channelwidth = CH_WIDTH_5MHZ;
+    else if (pSessionEntry->sub20_channelwidth == SUB20_MODE_10MHZ)
+            pChnlParams->channelwidth = CH_WIDTH_10MHZ;
+
+    if (pSessionEntry->bssType == eSIR_INFRASTRUCTURE_MODE &&
+        pSessionEntry->sub20_channelwidth !=
+        pMac->sta_sub20_current_channelwidth)
+        sme_set_sta_chanlist_with_sub20(pMac,
+                                        pSessionEntry->sub20_channelwidth);
+
+    limLog(pMac, LOG1, FL("Set sub20 channel width %d"),
+           pSessionEntry->sub20_channelwidth);
+
+    if (pSessionEntry->ssidHidden)
+        pChnlParams->ssidHidden = pSessionEntry->ssidHidden;
+
+    if (pSessionEntry->ssId.length) {
+        vos_mem_copy((uint8_t*)pChnlParams->ssid.ssId,
+		     (uint8_t*)pSessionEntry->ssId.ssId,
+		     pSessionEntry->ssId.length);
+        pChnlParams->ssid.length = pSessionEntry->ssId.length;
+        limLog(pMac, LOGE, FL("ssid name: %s length %d"),
+	       pChnlParams->ssid.ssId, pChnlParams->ssid.length);
+    }
     //we need to defer the message until we get the response back from WDA.
     SET_LIM_PROCESS_DEFD_MESGS(pMac, false);
     msgQ.type = WDA_CHNL_SWITCH_REQ;

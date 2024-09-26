@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014, 2016, 2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, 2016-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -48,10 +48,6 @@
 #include  <vos_status.h>
 #include  <i_vos_types.h>
 
-void __printf(3,4) vos_snprintf(char *strBuffer, unsigned  int size,
-                                char *strFormat, ...);
-#define VOS_SNPRINTF vos_snprintf
-#define vos_scnprintf scnprintf
 /*--------------------------------------------------------------------------
   Type declarations
   ------------------------------------------------------------------------*/
@@ -115,12 +111,17 @@ typedef enum
 
 #endif
 
+#define ROW_SIZE 16
+/* Buffer size = data bytes(2 hex chars plus space) + NULL */
+#define BUFFER_SIZE ((ROW_SIZE * 3) + 1)
+
+
 /*--------------------------------------------------------------------------
   Structure definition
   ------------------------------------------------------------------------*/
 typedef struct  svosTraceRecord
 {
-    v_U64_t time;
+    char time[20];
     v_U8_t module;
     v_U8_t code;
     v_U16_t session;

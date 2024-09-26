@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -47,11 +47,15 @@
 #define WLAN_HDD_GET_TYPE_FRM_FC(__fc__)         (((__fc__) & 0x0F) >> 2)
 #define WLAN_HDD_GET_SUBTYPE_FRM_FC(__fc__)      (((__fc__) & 0xF0) >> 4)
 #define WLAN_HDD_80211_FRM_DA_OFFSET             4
+#define WLAN_HDD_80211_FRM_SA_OFFSET             10
 #define P2P_WILDCARD_SSID_LEN                    7
 #define P2P_WILDCARD_SSID                        "DIRECT-"
 
 #define P2P_ROC_DURATION_MULTIPLIER_GO_PRESENT   2
 #define P2P_ROC_DURATION_MULTIPLIER_GO_ABSENT    5
+
+#define ACTION_FRAME_RSP_WAIT 500
+#define ACTION_FRAME_ACK_WAIT 300
 
 #ifdef WLAN_FEATURE_11W
 #define WLAN_HDD_SET_WEP_FRM_FC(__fc__)     ( (__fc__) = ((__fc__) | 0x40))
@@ -69,6 +73,7 @@ enum hdd_rx_flags {
 #define P2P_POWER_SAVE_TYPE_OPPORTUNISTIC        (1 << 0)
 #define P2P_POWER_SAVE_TYPE_PERIODIC_NOA         (1 << 1)
 #define P2P_POWER_SAVE_TYPE_SINGLE_NOA           (1 << 2)
+#define NOA_INTERVAL_IN_TU                        102400
 
 #ifdef WLAN_FEATURE_P2P_DEBUG
 typedef enum  { P2P_NOT_ACTIVE,
@@ -127,13 +132,15 @@ int hdd_setP2pPs( struct net_device *dev, void *msgData );
 int hdd_setP2pOpps( struct net_device *dev, tANI_U8 *command );
 int hdd_setP2pNoa( struct net_device *dev, tANI_U8 *command );
 
-void hdd_indicateMgmtFrame( hdd_adapter_t *pAdapter,
+void __hdd_indicate_mgmt_frame(hdd_adapter_t *pAdapter,
                             tANI_U32 nFrameLength, tANI_U8* pbFrames,
                             tANI_U8 frameType,
-                            tANI_U32 rxChan, tANI_S8 rxRssi);
+                            tANI_U32 rxChan, tANI_S8 rxRssi,
+                            enum rxmgmt_flags rx_flags);
 
 void hdd_remainChanReadyHandler( hdd_adapter_t *pAdapter );
 void hdd_sendActionCnf( hdd_adapter_t *pAdapter, tANI_BOOLEAN actionSendSuccess );
+void hdd_send_action_cnf_cb(uint32_t session_id, bool status);
 int wlan_hdd_check_remain_on_channel(hdd_adapter_t *pAdapter);
 void wlan_hdd_cancel_existing_remain_on_channel(hdd_adapter_t *pAdapter);
 
@@ -165,8 +172,20 @@ int wlan_hdd_mgmt_tx( struct wiphy *wiphy, struct net_device *dev,
                      const u8 *buf, size_t len, u64 *cookie );
 #endif
 
-
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)) || defined(WITH_BACKPORTS)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0))
+struct wireless_dev *wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
+                                               const char *name,
+                                               unsigned char name_assign_type,
+                                               enum nl80211_iftype type,
+                                               struct vif_params *params);
+#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0))
+struct wireless_dev *wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
+                                               const char *name,
+                                               unsigned char name_assign_type,
+                                               enum nl80211_iftype type,
+                                               u32 *flags,
+                                               struct vif_params *params);
+#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)) || defined(WITH_BACKPORTS)
 struct wireless_dev* wlan_hdd_add_virtual_intf(
                   struct wiphy *wiphy, const char *name,
                   enum nl80211_iftype type,
@@ -183,8 +202,12 @@ struct net_device* wlan_hdd_add_virtual_intf(
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,6,0)) || defined(WITH_BACKPORTS)
 int wlan_hdd_del_virtual_intf( struct wiphy *wiphy, struct wireless_dev *wdev );
+int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy,
+                                        struct wireless_dev *wdev);
 #else
 int wlan_hdd_del_virtual_intf( struct wiphy *wiphy, struct net_device *dev );
+int __wlan_hdd_del_virtual_intf(struct wiphy *wiphy,
+                                        struct net_device *dev);
 #endif
 
 void wlan_hdd_cleanup_remain_on_channel_ctx(hdd_adapter_t *pAdapter);
@@ -193,4 +216,17 @@ void wlan_hdd_cleanup_remain_on_channel_ctx(hdd_adapter_t *pAdapter);
 #define MAX_ROC_REQ_QUEUE_ENTRY 10
 
 void wlan_hdd_roc_request_dequeue(struct work_struct *work);
+
+/**
+ * hdd_check_random_mac() - Whether addr is present in random_mac array
+ * @adapter: Pointer to adapter
+ * @mac_addr: random mac address
+ *
+ * This function is used to check whether given mac addr is present in list of
+ * random_mac structures in specified adapter
+ *
+ * Return: If random addr is present return true else false
+ */
+bool hdd_check_random_mac(hdd_adapter_t *adapter, uint8_t *random_mac_addr);
+
 #endif // __P2P_H

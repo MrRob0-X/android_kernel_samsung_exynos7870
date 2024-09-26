@@ -221,7 +221,7 @@ rrmSetMaxTxPowerRsp ( tpAniSirGlobal pMac, tpSirMsgQ limMsgQ )
    {
       for (i =0;i < pMac->lim.maxBssId;i++)
       {
-         if (pMac->lim.gpSession[i].valid == TRUE)
+         if (pMac->lim.gpSession[i].valid == TRUE )
          {
             pSessionEntry = &pMac->lim.gpSession[i];
             rrmCacheMgmtTxPower ( pMac, pMaxTxParams->power, pSessionEntry );
@@ -386,7 +386,6 @@ rrmProcessNeighborReportResponse( tpAniSirGlobal pMac,
    vos_mem_set(pSmeNeighborRpt, length, 0);
 
    /* Allocated memory for pSmeNeighborRpt...will be freed by other module */
-
    for( i = 0 ; i < pNeighborRep->num_NeighborReport ; i++ )
    {
       pSmeNeighborRpt->sNeighborBssDescription[i].length = sizeof( tSirNeighborBssDescription ); /*+ any optional ies */
@@ -418,7 +417,8 @@ rrmProcessNeighborReportResponse( tpAniSirGlobal pMac,
    //Send request to SME.
    mmhMsg.type    = pSmeNeighborRpt->messageType;
    mmhMsg.bodyptr = pSmeNeighborRpt;
-   MTRACE(macTraceMsgTx(pMac, pSessionEntry->peSessionId, mmhMsg.type));
+   MTRACE(macTrace(pMac, TRACE_CODE_TX_SME_MSG, pSessionEntry->peSessionId,
+                                                           mmhMsg.type));
    status = limSysProcessMmhMsgApi(pMac, &mmhMsg, ePROT);
 
    return status;
@@ -652,8 +652,12 @@ rrmProcessBeaconReportReq( tpAniSirGlobal pMac,
    //Send request to SME.
    mmhMsg.type    = eWNI_SME_BEACON_REPORT_REQ_IND;
    mmhMsg.bodyptr = pSmeBcnReportReq;
-   MTRACE(macTraceMsgTx(pMac, pSessionEntry->peSessionId, mmhMsg.type));
-   return limSysProcessMmhMsgApi(pMac, &mmhMsg, ePROT);
+   MTRACE(macTrace(pMac, TRACE_CODE_TX_SME_MSG, pSessionEntry->peSessionId,
+                                                          mmhMsg.type));
+   if (eSIR_SUCCESS != limSysProcessMmhMsgApi(pMac, &mmhMsg, ePROT))
+      return eRRM_FAILURE;
+
+   return eRRM_SUCCESS;
 }
 
 // --------------------------------------------------------------------
@@ -1247,8 +1251,8 @@ rrmInitialize(tpAniSirGlobal pMac)
    pRRMCaps->fine_time_meas_rpt = 1;
    pRRMCaps->lci_capability = 1;
 
-   pRRMCaps->operatingChanMax = 3;
-   pRRMCaps->nonOperatingChanMax = 3;
+   pRRMCaps->operatingChanMax = 4;
+   pRRMCaps->nonOperatingChanMax = 4;
 
    return eSIR_SUCCESS;
 }

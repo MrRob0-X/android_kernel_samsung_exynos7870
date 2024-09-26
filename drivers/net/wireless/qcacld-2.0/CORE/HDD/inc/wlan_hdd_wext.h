@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -70,9 +70,6 @@
 /* 012345678 */
 #define WLAN_HDD_UI_SET_BAND_VALUE_OFFSET              8
 
-#ifdef SEC_CONFIG_GRIP_POWER
-#define WLAN_HDD_UI_SET_GRIP_TX_PWR_VALUE_OFFSET       21
-#endif
 typedef enum
 {
    HDD_WLAN_WMM_DIRECTION_UPSTREAM      = 0,
@@ -260,6 +257,8 @@ typedef enum
  * TSF_GET_FAIL:                 get fail
  * TSF_RESET_GPIO_FAIL:          GPIO reset fail
  * TSF_SAP_NOT_STARTED_NO_TSF    SAP not started
+ * TSF_NOT_READY: TSF module is not initialized or init failed
+ * TSF_DISABLED_BY_TSFPLUS: cap_tsf/get_tsf are disabled due to TSF_PLUS
  */
 enum hdd_tsf_get_state {
 	TSF_RETURN = 0,
@@ -269,7 +268,9 @@ enum hdd_tsf_get_state {
 	TSF_CAPTURE_FAIL,
 	TSF_GET_FAIL,
 	TSF_RESET_GPIO_FAIL,
-	TSF_SAP_NOT_STARTED_NO_TSF
+	TSF_SAP_NOT_STARTED_NO_TSF,
+	TSF_NOT_READY,
+	TSF_DISABLED_BY_TSFPLUS
 };
 
 /**
@@ -345,6 +346,10 @@ typedef struct ccp_freq_chan_map_s{
     v_U32_t chan;
 }hdd_freq_chan_map_t;
 
+struct temperature_info {
+	int temperature;
+};
+
 #define wlan_hdd_get_wps_ie_ptr(ie, ie_len) \
     wlan_hdd_get_vendor_oui_ie_ptr(WPS_OUI_TYPE, WPS_OUI_TYPE_SIZE, ie, ie_len)
 
@@ -366,7 +371,7 @@ extern int hdd_wlan_get_frag_threshold(hdd_adapter_t *pAdapter,
 extern void hdd_wlan_get_version(hdd_adapter_t *pAdapter,
                                  union iwreq_data *wrqu, char *extra);
 
-extern void hdd_wlan_get_stats(hdd_adapter_t *pAdapter, v_U16_t *length,
+extern int hdd_wlan_get_stats(hdd_adapter_t *pAdapter, v_U16_t *length,
                                char *buffer, v_U16_t buf_len);
 
 extern void hdd_wlan_dump_stats(hdd_adapter_t *pAdapter, int value);
@@ -461,11 +466,50 @@ VOS_STATUS iw_set_tdls_params(struct net_device *dev, struct iw_request_info *in
 #endif
 
 #ifdef WLAN_FEATURE_PACKET_FILTERING
-void wlan_hdd_set_mc_addr_list(hdd_adapter_t *pAdapter, v_U8_t set);
+int wlan_hdd_set_mc_addr_list(hdd_adapter_t *pAdapter, v_U8_t set);
 #endif
 void* wlan_hdd_change_country_code_callback(void *pAdapter);
 
 VOS_STATUS  wlan_hdd_set_powersave(hdd_adapter_t *pAdapter, int mode);
+
+/**
+ * enum tdcc_cmd_type - type of TDCC commmand to process
+ * @PS_TDCC_SET: command to set TDCC parameters
+ * @PS_TDCC_GET: command to get TDCC parameters
+ * @PS_TDCC_RESET: command to reset TDCC parameters to initial value
+ */
+enum tdcc_cmd_type {
+	PS_TDCC_SET,
+	PS_TDCC_GET,
+	PS_TDCC_RESET,
+};
+
+/**
+ * wlan_hdd_process_tdcc_ps() - To process set_ps_tdcc command
+ * @adapter: adapter handle
+ * @cmd: tdcc command to be processed
+ * @enable: 1 enable, 0 disable
+ * @percentage: percentage of tx duty cycle control
+ *
+ * Return: 0 if success, otherwise error code
+ */
+int wlan_hdd_process_tdcc_ps(hdd_adapter_t *adapter,
+			     enum tdcc_cmd_type cmd,
+			     int *enable, int *percentage);
+
+/**
+ * hdd_wlan_get_ps_tdcc_info() - get tdcc info and print to buffer
+ * @adapter: adapter handle
+ * @length: the whole output string length
+ * @buffer: input buffer
+ * @buf_len: input buffer length
+ *
+ * Return: 0 if success, otherwise error code
+ */
+int hdd_wlan_get_ps_tdcc_info(hdd_adapter_t *adapter,
+			      uint16_t *length,
+			      char *buffer,
+			      uint16_t buf_len);
 
 int hdd_setBand(struct net_device *dev, u8 ui_band);
 int hdd_setBand_helper(struct net_device *dev, const char *command);
@@ -479,8 +523,10 @@ int process_wma_set_command_twoargs(int sessid, int paramid,
 void hdd_GetTemperatureCB(int temperature, void *cookie);
 VOS_STATUS wlan_hdd_get_temperature(hdd_adapter_t *adapter_ptr,
         union iwreq_data *wrqu, char *extra);
-#ifdef SEC_CONFIG_GRIP_POWER
-int hdd_setGripPwr(struct net_device *dev, u8 set_value);
-int hdd_setGripPwr_helper(struct net_device *dev, const char *command);
+#ifdef AUDIO_MULTICAST_AGGR_SUPPORT
+int wlan_hdd_set_multicast_retry_limit(hdd_adapter_t *adapter,
+			int group_id,int retry_limit);
+int wlan_hdd_multicast_aggr_enable(hdd_adapter_t *adapter,
+						int aggr_enable, int tbd_enable);
 #endif
 #endif // __WEXT_IW_H__

@@ -38,6 +38,12 @@ ol_txrx_peer_unref_delete(struct ol_txrx_peer_t *peer);
 u_int16_t
 ol_tx_desc_pool_size_hl(ol_pdev_handle ctrl_pdev);
 
+#ifdef QCA_SUPPORT_TXRX_DRIVER_TCP_DEL_ACK
+struct tcp_stream_node *ol_txrx_vdev_alloc_tcp_node(struct ol_txrx_vdev_t *vdev);
+void ol_txrx_vdev_free_tcp_node(struct ol_txrx_vdev_t *vdev,
+				struct tcp_stream_node *node);
+void ol_txrx_vdev_deinit_tcp_del_ack(struct ol_txrx_vdev_t *vdev);
+#endif
 
 #ifndef OL_TX_AVG_FRM_BYTES
 #define OL_TX_AVG_FRM_BYTES 1000
@@ -64,6 +70,9 @@ ol_tx_desc_pool_size_hl(ol_pdev_handle ctrl_pdev);
 #define TXRX_HL_TX_DESC_HI_PRIO_RESERVED 20
 #endif
 
+A_STATUS
+ol_txrx_get_ll_queue_pause_bitmap(uint8_t vdev_id,
+	uint8_t *pause_bitmap, adf_os_time_t *pause_timestamp);
 int ol_txrx_fw_stats_desc_pool_init(struct ol_txrx_pdev_t *pdev,
 				    uint8_t pool_size);
 void ol_txrx_fw_stats_desc_pool_deinit(struct ol_txrx_pdev_t *pdev);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2014-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011, 2014-2017, 2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -46,6 +46,7 @@
 #if defined(HIF_PCI)
 #include "if_pci.h"
 #endif
+#include "vos_utils.h"
 
 #define HTT_HTC_PKT_POOL_INIT_SIZE 100 /* enough for a large A-MPDU */
 
@@ -181,6 +182,75 @@ htt_htc_misc_pkt_pool_free(struct htt_pdev_t *pdev)
 #endif
 
 /*---*/
+
+int cali_init(struct htt_pdev_t *pdev)
+{
+	int i, j;
+
+	adf_os_print("cali_init enter\n");
+
+	for (i = 0; i < MAX_WIFI_CHAN_CNT; i++) {
+		for (j = 0; j < CALI_FRAG_IDX_MAX; j++) {
+			pdev->chan_cali_data_array[i].cali_data_buf[j] = NULL;
+			pdev->chan_cali_data_array[i].cali_data_valid[j] = false;
+			pdev->chan_cali_data_array[i].buf[j] =
+			adf_nbuf_alloc(pdev->osdev,
+				       HTT_MSG_BUF_SIZE(CHAN_CALI_DATA_LEN),
+				       /* reserve room for HTC header */
+				       HTC_HEADER_LEN +
+					HTC_HDR_ALIGNMENT_PADDING, 4, FALSE);
+			if (!pdev->chan_cali_data_array[i].buf[j]) {
+				adf_os_print("chan idx %d frag idx %d alloc buf failed\n", i, j);
+				return A_NO_MEMORY;
+			}
+		}
+	}
+
+	adf_os_print("cali_init done\n");
+	return A_OK;
+}
+
+void cali_deinit(struct htt_pdev_t *pdev)
+{
+	int i, j;
+
+	for (i = 0; i < MAX_WIFI_CHAN_CNT; i++) {
+		for (j = 0; j < CALI_FRAG_IDX_MAX; j++) {
+			pdev->chan_cali_data_array[i].cali_data_valid[j] = false;
+			if (pdev->chan_cali_data_array[i].buf[j]) {
+				adf_nbuf_free(pdev->chan_cali_data_array[i].buf[j]);
+				pdev->chan_cali_data_array[i].cali_data_buf[j] = NULL;
+			}
+			pdev->chan_cali_data_array[i].buf[j] = NULL;
+		}
+	}
+
+	return;
+}
+
+u8 get_chan_cali_data_index(uint32_t freq)
+{
+	u8 chan_num;
+	u8 index;
+
+	chan_num = vos_freq_to_chan(freq);
+	if (chan_num <= VOS_24_GHZ_CHANNEL_14) {
+		index = chan_num - 1;
+	} else {
+		if (36 <= chan_num && 64 >= chan_num) {
+			index = ((chan_num - 36) >> 2) + 14;
+		} else if (100 <= chan_num && 144 >= chan_num) {
+			index = ((chan_num - 100) >> 2) + 22;
+		} else if (149 <= chan_num && 173 >= chan_num) {
+			index = ((chan_num - 149) >> 2) + 34;
+		} else {
+			adf_os_print("unsupport freq to cali %d\n", freq);
+			index = MAX_WIFI_CHAN_CNT;
+		}
+	}
+
+	return index;
+}
 
 htt_pdev_handle
 htt_attach(
@@ -389,9 +459,17 @@ htt_attach_target(htt_pdev_handle pdev)
     return status;
 }
 
+void htt_htc_detach(struct htt_pdev_t *pdev)
+{
+    htc_disconnect_service(pdev->htc_endpoint);
+    return;
+}
+
+
 void
 htt_detach(htt_pdev_handle pdev)
 {
+    htt_htc_detach(pdev);
     htt_rx_detach(pdev);
     htt_tx_detach(pdev);
     htt_htc_pkt_pool_free(pdev);
@@ -453,7 +531,8 @@ htt_htc_attach(struct htt_pdev_t *pdev)
      * TODO:Conditional disabling will be removed once firmware
      * with reduced tx completion is pushed into release builds.
      */
-    if (!pdev->cfg.default_tx_comp_req) {
+    if ((!pdev->cfg.default_tx_comp_req) ||
+            ol_cfg_is_ptp_enabled(pdev->ctrl_pdev)) {
        connect.ConnectionFlags |= HTC_CONNECT_FLAGS_DISABLE_CREDIT_FLOW_CTRL;
     }
 #else
@@ -527,12 +606,12 @@ htt_display(htt_pdev_handle pdev, int indent)
         indent+4, " ",
         pdev->rx_ring.size,
         pdev->rx_ring.fill_level);
-    adf_os_print("%*sat %p (%#x paddr)\n", indent+8, " ",
+    adf_os_print("%*sat %pK (%#x paddr)\n", indent+8, " ",
         pdev->rx_ring.buf.paddrs_ring,
         pdev->rx_ring.base_paddr);
-    adf_os_print("%*snetbuf ring @ %p\n", indent+8, " ",
+    adf_os_print("%*snetbuf ring @ %pK\n", indent+8, " ",
         pdev->rx_ring.buf.netbufs_ring);
-    adf_os_print("%*sFW_IDX shadow register: vaddr = %p, paddr = %#x\n",
+    adf_os_print("%*sFW_IDX shadow register: vaddr = %pK, paddr = %#x\n",
         indent+8, " ",
         pdev->rx_ring.alloc_idx.vaddr,
         pdev->rx_ring.alloc_idx.paddr);
@@ -657,4 +736,24 @@ void htt_clear_bundle_stats(htt_pdev_handle pdev)
     HTCClearBundleStats(pdev->htc_pdev);
 }
 #endif
+
+/**
+ * htt_mark_first_wakeup_packet() - set flag to indicate that
+ *    fw is compatible for marking first packet after wow wakeup
+ * @pdev: pointer to htt pdev
+ * @value: 1 for enabled/ 0 for disabled
+ *
+ * Return: None
+ */
+void htt_mark_first_wakeup_packet(htt_pdev_handle pdev,
+			uint8_t value)
+{
+	if (!pdev) {
+		adf_os_print("%s: htt pdev is NULL", __func__);
+		return;
+	}
+
+	pdev->cfg.is_first_wakeup_packet = value;
+}
+
 

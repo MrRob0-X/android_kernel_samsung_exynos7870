@@ -314,7 +314,7 @@ __pktlog_enable(struct ol_softc *scn, int32_t log_state)
 	if (!scn) {
 		printk("%s: Invalid scn context\n", __func__);
 		ASSERT(0);
-		return -1;
+		return A_ERROR;
 	}
 
 	txrx_pdev = scn->pdev_txrx_handle;
@@ -328,7 +328,7 @@ __pktlog_enable(struct ol_softc *scn, int32_t log_state)
 	if (!pl_dev) {
 		printk("%s: Invalid pktlog context\n", __func__);
 		ASSERT(0);
-		return -1;
+		return A_ERROR;
 	}
 
 	pl_info = pl_dev->pl_info;
@@ -347,11 +347,11 @@ __pktlog_enable(struct ol_softc *scn, int32_t log_state)
 			if (!pl_info->buf) {
 				printk("%s: pktlog buf alloc failed\n", __func__);
 				ASSERT(0);
-				return -1;
+				return A_ERROR;
 			}
 		}
 
-		spin_lock_bh(&pl_info->log_lock);
+		adf_os_spin_lock_bh(&pl_info->log_lock);
 		pl_info->buf->bufhdr.version = CUR_PKTLOG_VER;
 		pl_info->buf->bufhdr.magic_num = PKTLOG_MAGIC_NUM;
 		pl_info->buf->wr_offset = 0;
@@ -360,7 +360,7 @@ __pktlog_enable(struct ol_softc *scn, int32_t log_state)
 		pl_info->buf->bytes_written = 0;
 		pl_info->buf->msg_index = 1;
 		pl_info->buf->offset = PKTLOG_READ_OFFSET;
-		spin_unlock_bh(&pl_info->log_lock);
+		adf_os_spin_unlock_bh(&pl_info->log_lock);
 
 		pl_info->start_time_thruput = OS_GET_TIMESTAMP();
 		pl_info->start_time_per = pl_info->start_time_thruput;
@@ -369,60 +369,64 @@ __pktlog_enable(struct ol_softc *scn, int32_t log_state)
 		if (wdi_pktlog_subscribe(txrx_pdev, log_state)) {
 			printk("Unable to subscribe to the WDI %s\n",
 			       __func__);
-			return -1;
+			return A_ERROR;
 		}
 		/* WMI command to enable pktlog on the firmware */
 		if (pktlog_enable_tgt(scn, log_state)) {
-			printk("Device cannot be enabled, %s\n", __func__);
-			return -1;
+			adf_os_print("Device cannot be enabled, %s\n", __func__);
+			wdi_pktlog_unsubscribe(txrx_pdev, pl_info->log_state);
+			return A_ERROR;
 		} else {
 			pl_dev->tgt_pktlog_enabled = true;
 		}
+		pl_info->log_state = log_state;
 	} else if (!log_state && pl_dev->tgt_pktlog_enabled) {
 		pl_dev->pl_funcs->pktlog_disable(scn);
 		pl_dev->tgt_pktlog_enabled = false;
 		if (wdi_pktlog_unsubscribe(txrx_pdev, pl_info->log_state)) {
-			printk("Cannot unsubscribe pktlog from the WDI\n");
-			return -1;
+			adf_os_print("%s: Cannot unsubscribe pktlog from the WDI\n",
+				__func__);
+			return A_ERROR;
 		}
+		pl_info->log_state = log_state;
 	}
 
-	pl_info->log_state = log_state;
 	return 0;
+
+}
+
+int pktlog_enable(struct ol_softc *scn, int32_t log_state)
+{
+	struct ol_pktlog_dev_t *pl_dev;
+	struct ath_pktlog_info *pl_info;
+	int error;
+
+	if (!scn) {
+		printk("%s: Invalid scn context\n", __func__);
+		ASSERT(0);
+		return A_ERROR;
+	}
+
+	pl_dev = scn->pdev_txrx_handle->pl_dev;
+	if (!pl_dev) {
+		printk("%s: Invalid pktlog context\n", __func__);
+		ASSERT(0);
+		return A_ERROR;
+	}
+
+	pl_info = pl_dev->pl_info;
+
+	if (!pl_info)
+		return 0;
+
+	mutex_lock(&pl_info->pktlog_mutex);
+	error = __pktlog_enable(scn, log_state);
+	mutex_unlock(&pl_info->pktlog_mutex);
+	return error;
 }
 
 #define ONE_MEGABYTE (1024 * 1024)
 #define MAX_ALLOWED_PKTLOG_SIZE (16 * ONE_MEGABYTE)
-
-int pktlog_enable(struct ol_softc *scn, int32_t log_state)
-{
-       struct ol_pktlog_dev_t *pl_dev;
-       struct ath_pktlog_info *pl_info;
-       int error;
-
-       if (!scn) {
-               printk("%s: Invalid scn context\n", __func__);
-               ASSERT(0);
-               return A_ERROR;
-       }
-
-       pl_dev = scn->pdev_txrx_handle->pl_dev;
-       if (!pl_dev) {
-               printk("%s: Invalid pktlog context\n", __func__);
-               ASSERT(0);
-               return A_ERROR;
-       }
-
-       pl_info = pl_dev->pl_info;
-
-       if (!pl_info)
-               return 0;
-
-       mutex_lock(&pl_info->pktlog_mutex);
-       error = __pktlog_enable(scn, log_state);
-       mutex_unlock(&pl_info->pktlog_mutex);
-       return error;
-}
 
 static int
 __pktlog_setsize(struct ol_softc *scn, int32_t size)
@@ -446,13 +450,13 @@ __pktlog_setsize(struct ol_softc *scn, int32_t size)
 		return -EINVAL;
 	}
 
-	spin_lock_bh(&pl_info->log_lock);
+	adf_os_spin_lock_bh(&pl_info->log_lock);
 	if (pl_info->buf != NULL)
 		pktlog_release_buf(scn);
 
 	if (size != 0)
 		pl_info->buf_size = size;
-	spin_unlock_bh(&pl_info->log_lock);
+	adf_os_spin_unlock_bh(&pl_info->log_lock);
 
 	return 0;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -72,32 +72,11 @@
 #include <vos_threads.h>
 #include <vos_timer.h>
 #include <vos_pack_align.h>
+#include <linux/firmware.h>
 
 #define VOS_WDA_TIMEOUT 15000
 
-#ifdef CONFIG_SEC
-/**
- * enum vos_hang_reason - host hang/ssr reason
- * @VOS_REASON_UNSPECIFIED: Unspecified reason
- * @VOS_GET_MSG_BUFF_FAILURE: Unable to get the message buffer
- * @VOS_ACTIVE_LIST_TIMEOUT: Current command processing is timedout
- * @VOS_SCAN_REQ_EXPIRED: Scan request timed out
- * @VOS_TRANSMISSIONS_TIMEOUT: transmission timed out
- * @VOS_DXE_FAILURE: dxe failure
- * @VOS_WDI_FAILURE: wdi failure
- */
-enum vos_hang_reason {
-	VOS_REASON_UNSPECIFIED = 0,
-	VOS_GET_MSG_BUFF_FAILURE = 1,
-	VOS_ACTIVE_LIST_TIMEOUT = 2,
-	VOS_SCAN_REQ_EXPIRED = 3,
-	VOS_TRANSMISSIONS_TIMEOUT = 4,
-	VOS_DXE_FAILURE = 5,
-	VOS_WDI_FAILURE = 6,
-	VOS_SS_SPECIFIC_HANG = 7,
-	VOS_SS_SPECIFIC_HANG2 = 8,
-};
-#endif /* CONFIG_SEC */
+#define vos_roundup(x, y) roundup(x, y);
 
 /*-------------------------------------------------------------------------
   Function declarations and documenation
@@ -170,6 +149,25 @@ VOS_STATUS vos_wda_shutdown( v_CONTEXT_t vosContext );
 v_VOID_t *vos_get_context( VOS_MODULE_ID moduleId,
                            v_CONTEXT_t vosContext );
 
+/**---------------------------------------------------------------------------
+
+  \brief vos_set_context() - set context for specified module
+
+  Each module in the system has a context / data area that is allocated
+  and maanged by voss.  This API allows any user to set the context data
+  area in the VOSS global context.
+
+  \param module_id - the module ID, who's context data are is being changed.
+
+  \param mod_context - context data area of the specified module.
+
+  \return VOS_STATUS_SUCCESS - context was successfully changed.
+
+          VOS_STATUS_E_INVAL - global context is null or module id is invalid.
+
+  --------------------------------------------------------------------------*/
+VOS_STATUS vos_set_context(VOS_MODULE_ID module_id,
+                           v_PVOID_t mod_context);
 
 /**---------------------------------------------------------------------------
 
@@ -194,13 +192,22 @@ v_CONTEXT_t vos_get_global_context( VOS_MODULE_ID moduleId,
 v_U8_t vos_is_logp_in_progress(VOS_MODULE_ID moduleId, v_VOID_t *moduleContext);
 void vos_set_logp_in_progress(VOS_MODULE_ID moduleId, v_U8_t value);
 
-v_BOOL_t vos_is_unload_in_progress(VOS_MODULE_ID moduleId,
-				 v_VOID_t *moduleContext);
+v_U8_t vos_is_ssr_failed(void);
+void vos_set_ssr_failed(v_U8_t value);
+
 v_U8_t vos_is_load_unload_in_progress(VOS_MODULE_ID moduleId, v_VOID_t *moduleContext);
 void vos_set_load_unload_in_progress(VOS_MODULE_ID moduleId, v_U8_t value);
 
+v_U8_t vos_is_unload_in_progress(void);
+void vos_set_unload_in_progress(v_U8_t value);
+
 v_U8_t vos_is_load_in_progress(VOS_MODULE_ID moduleId, v_VOID_t *moduleContext);
 void vos_set_load_in_progress(VOS_MODULE_ID moduleId, v_U8_t value);
+
+bool vos_is_shutdown_in_progress(VOS_MODULE_ID moduleId,
+                                 v_VOID_t *moduleContext);
+void vos_set_shutdown_in_progress(VOS_MODULE_ID moduleId,
+                                  bool value);
 
 v_U8_t vos_is_reinit_in_progress(VOS_MODULE_ID moduleId, v_VOID_t *moduleContext);
 void vos_set_reinit_in_progress(VOS_MODULE_ID moduleId, v_U8_t value);
@@ -353,14 +360,61 @@ VOS_STATUS vos_wlanRestart(void);
 v_VOID_t vos_fwDumpReq(tANI_U32 cmd, tANI_U32 arg1, tANI_U32 arg2,
                         tANI_U32 arg3, tANI_U32 arg4);
 
-v_VOID_t vos_flush_work(v_VOID_t *work);
-v_VOID_t vos_flush_delayed_work(v_VOID_t *dwork);
-
 v_BOOL_t vos_is_packet_log_enabled(void);
+
+/**
+ * vos_is_fast_chswitch_cali_enabled()
+ *
+ * This function is used to check whether fast channel switch cali enabled
+ * Return: true if function enabled
+ */
+bool vos_is_fast_chswitch_cali_enabled(void);
+
+v_BOOL_t vos_config_is_no_ack(void);
+
+#ifdef WLAN_FEATURE_TSF_PLUS
+bool vos_is_ptp_rx_opt_enabled(void);
+bool vos_is_ptp_tx_opt_enabled(void);
+#else
+static inline bool vos_is_ptp_rx_opt_enabled(void)
+{
+	return false;
+}
+
+static inline bool vos_is_ptp_tx_opt_enabled(void)
+{
+	return false;
+}
+#endif
+
+#ifdef WLAN_FEATURE_DSRC
+bool vos_is_ocb_tx_per_pkt_stats_enabled(void);
+#else
+static inline bool vos_is_ocb_tx_per_pkt_stats_enabled(void)
+{
+	return false;
+}
+#endif
 
 v_U64_t vos_get_monotonic_boottime(void);
 
-void vos_trigger_recovery(void);
+/**
+ * vos_get_monotonic_boottime_ns - Get kenel boottime in ns
+ *
+ * Return: kernel boottime in nano sec
+ */
+v_U64_t vos_get_monotonic_boottime_ns(void);
+
+/**
+ * vos_get_bootbased_boottime_ns - Get kenel boottime in ns
+ * it includes the system suspend time also
+ * Return: kernel boottime in nano sec
+ */
+
+v_U64_t vos_get_bootbased_boottime_ns(void);
+
+bool vos_is_self_recovery_enabled(void);
+void vos_trigger_recovery(bool);
 
 #ifdef FEATURE_WLAN_D0WOW
 v_VOID_t vos_pm_control(v_BOOL_t vote);
@@ -375,39 +429,62 @@ uint8_t vos_is_multicast_logging(void);
 VOS_STATUS vos_set_log_completion(uint32_t is_fatal,
 		uint32_t type,
 		uint32_t sub_type);
-void vos_get_log_completion(uint32_t *is_fatal,
+void vos_get_log_and_reset_completion(uint32_t *is_fatal,
 		uint32_t *type,
-		uint32_t *sub_type);
+		uint32_t *sub_type,
+		uint32_t *is_ssr_needed);
 bool vos_is_log_report_in_progress(void);
+bool vos_is_fatal_event_enabled(void);
+uint32_t vos_get_log_indicator(void);
 void vos_init_log_completion(void);
 void vos_deinit_log_completion(void);
 VOS_STATUS vos_flush_logs(uint32_t is_fatal,
 		uint32_t indicator,
-		uint32_t reason_code);
+		uint32_t reason_code,
+		uint32_t dump_vos_trace);
+void vos_wlan_flush_host_logs_for_fatal(void);
 void vos_logging_set_fw_flush_complete(void);
-
-#ifdef CONFIG_SEC
+void vos_probe_threads(void);
+void vos_set_fatal_event(bool value);
+void vos_pkt_stats_to_logger_thread(void *pl_hdr, void *pkt_dump, void *data);
+int vos_get_radio_index(void);
+int vos_set_radio_index(int radio_index);
+void vos_svc_fw_shutdown_ind(struct device *dev);
+void vos_svc_fw_crashed_ind(struct device *dev);
+uint64_t vos_do_div(uint64_t, uint32_t);
 /**
- * vos_set_recovery_reason() - get self recovery reason
- * @reason: recovery reason
+ * vos_do_div64() - Do uint64/64 divsion.
+ * @dividend: Dividend value
+ * @divisor: Divisor value
  *
- * Return: None
+ * Return: Quotient
  */
-void vos_set_recovery_reason(enum vos_hang_reason reason);
+uint64_t vos_do_div64(uint64_t dividend, uint64_t divisor);
+VOS_STATUS vos_force_fw_dump(void);
 
+bool vos_is_probe_rsp_offload_enabled(void);
 /**
- * vos_get_recovery_reason() - get self recovery reason
- * @reason: recovery reason
+ * vos_is_mon_enable - API to check if moniotr mode is on now.
  *
- * Return: None
+ * return - false: monitor mode is off
+ *          true: monitor mode is on
  */
-void vos_get_recovery_reason(enum vos_hang_reason *reason);
+bool vos_is_mon_enable(void);
+v_BOOL_t vos_is_ch_switch_with_csa_enabled(void);
+#ifdef FEATURE_WLAN_DISABLE_CHANNEL_SWITCH
+bool vos_is_chan_ok_for_dnbs(uint8_t channel);
+#endif
 
-/**
- * vos_reset_recovery_reason() - reset the reason to unspecified
- *
- * Return: None
- */
-void vos_reset_recovery_reason(void);
-#endif /* CONFIG_SEC */
+int qca_request_firmware(const struct firmware **firmware_p,
+                const char *name,
+                struct device *device);
+
+#ifdef WLAN_SMART_ANTENNA_FEATURE
+uint32_t vos_get_smart_ant_cfg(void);
+#else
+static inline uint32_t vos_get_smart_ant_cfg(void)
+{
+	return 0;
+}
+#endif
 #endif // if !defined __VOS_API_H

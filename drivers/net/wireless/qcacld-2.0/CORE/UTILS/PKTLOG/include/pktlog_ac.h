@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013, 2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2013, 2016, 2018-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -40,10 +40,10 @@
 #define NO_REG_FUNCS	4
 
 /* Locking interface for pktlog */
-#define PKTLOG_LOCK_INIT(_pl_info)	spin_lock_init(&(_pl_info)->log_lock)
+#define PKTLOG_LOCK_INIT(_pl_info)	adf_os_spinlock_init(&(_pl_info)->log_lock)
 #define	PKTLOG_LOCK_DESTROY(_pl_info)
-#define PKTLOG_LOCK(_pl_info)		spin_lock(&(_pl_info)->log_lock)
-#define PKTLOG_UNLOCK(_pl_info)		spin_unlock(&(_pl_info)->log_lock)
+#define PKTLOG_LOCK(_pl_info)		adf_os_spin_lock(&(_pl_info)->log_lock)
+#define PKTLOG_UNLOCK(_pl_info)		adf_os_spin_unlock(&(_pl_info)->log_lock)
 
 #define PKTLOG_MODE_SYSTEM	1
 #define PKTLOG_MODE_ADAPTER	2
@@ -65,7 +65,6 @@ extern void pktlog_release_buf(struct ol_softc *scn);
 ssize_t pktlog_read_proc_entry(char *buf, size_t nbytes, loff_t *ppos,
 			       struct ath_pktlog_info *pl_info,
 			       bool *read_complete);
-int pktlog_send_per_pkt_stats_to_user(void);
 
 struct ol_pl_arch_dep_funcs {
 	void (*pktlog_init) (struct ol_softc *scn);
@@ -141,24 +140,5 @@ int pktlog_setsize(struct ol_softc *scn, int32_t log_state);
 int pktlog_disable(struct ol_softc *scn);
 int pktlogmod_init(void *context);
 void pktlogmod_exit(void *context);
-#else /* REMOVE_PKT_LOG */
-#define ol_pktlog_attach(_scn)	({ (void)_scn; })
-#define ol_pktlog_detach(_scn)	({ (void)_scn; })
-static inline void pktlog_init(struct ol_softc *scn)
-{
-	return;
-}
-static int pktlog_enable(struct ol_softc *scn, int32_t log_state)
-{
-	return 0;
-}
-static int pktlog_setsize(struct ol_softc *scn, int32_t log_state)
-{
-	return 0;
-}
-static int pktlog_disable(struct ol_softc *scn)
-{
-	return 0;
-}
 #endif /* REMOVE_PKT_LOG */
 #endif /* _PKTLOG_AC_H_ */

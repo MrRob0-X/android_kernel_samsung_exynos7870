@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014 2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -46,6 +46,7 @@
 #include <linux/timer.h>
 #include <linux/time.h>
 #include <linux/jiffies.h>
+#include <adf_os_lock.h>
 
 /*--------------------------------------------------------------------------
   Preprocessor definitions and constants
@@ -63,9 +64,30 @@ typedef struct vos_timer_platform_s
    struct timer_list Timer;
    int threadID;
    v_U32_t cookie;
-   spinlock_t  spinlock;
+   adf_os_spinlock_t  spinlock;
 
 } vos_timer_platform_t;
+
+/**
+ * __vos_system_ticks() - get system ticks
+ *
+ * Return: system tick in jiffies
+ */
+static inline vos_time_t __vos_system_ticks(void)
+{
+	return jiffies;
+}
+
+/**
+ * __vos_system_ticks_to_msecs() - convert system ticks into milli seconds
+ * @ticks: System ticks
+ *
+ * Return: system tick converted into milli seconds
+ */
+static inline uint32_t __vos_system_ticks_to_msecs(vos_time_t ticks)
+{
+	return jiffies_to_msecs(ticks);
+}
 
 /*
  * TODOs: Need to add deferred timer implementation

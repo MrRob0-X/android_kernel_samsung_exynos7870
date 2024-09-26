@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -55,6 +55,7 @@
 #if defined(FEATURE_WLAN_ESE) && !defined(FEATURE_WLAN_ESE_UPLOAD)
 #include "eseApi.h"
 #endif
+#include "lim_process_fils.h"
 
 extern tSirRetStatus schBeaconEdcaProcess(tpAniSirGlobal pMac, tSirMacEdcaParamSetIE *edca, tpPESession psessionEntry);
 
@@ -84,6 +85,8 @@ void limUpdateAssocStaDatas(tpAniSirGlobal pMac, tpDphHashNode pStaDs, tpSirAsso
     tANI_U16        rxHighestRate = 0;
     uint32_t        shortgi_20mhz_support;
     uint32_t        shortgi_40mhz_support;
+    tDot11fIEVHTCaps *vht_caps = NULL;
+    tDot11fIEVHTOperation *vht_oper = NULL;
 
     limGetPhyMode(pMac, &phyMode, psessionEntry);
 
@@ -164,33 +167,48 @@ void limUpdateAssocStaDatas(tpAniSirGlobal pMac, tpDphHashNode pStaDs, tpSirAsso
        }
 
 #ifdef WLAN_FEATURE_11AC
-       if(IS_DOT11_MODE_VHT(psessionEntry->dot11mode))
-       {
-           pStaDs->mlmStaContext.vhtCapability = pAssocRsp->VHTCaps.present;
-           if (pAssocRsp->VHTCaps.present &&
-               psessionEntry->htSupportedChannelWidthSet)
-               pStaDs->vhtSupportedChannelWidthSet =
-                                   pAssocRsp->VHTOperation.chanWidth;
-       }
-
-       // If 11ac is supported and if the peer is sending VHT capabilities,
-       // then htMaxRxAMpduFactor should be overloaded with VHT maxAMPDULenExp
        if (pAssocRsp->VHTCaps.present)
-       {
-          pStaDs->htMaxRxAMpduFactor = pAssocRsp->VHTCaps.maxAMPDULenExp;
-       }
+           vht_caps = &pAssocRsp->VHTCaps;
+       else if (pAssocRsp->vendor2_ie.VHTCaps.present)
+            vht_caps = &pAssocRsp->vendor2_ie.VHTCaps;
+       if (pAssocRsp->VHTOperation.present)
+           vht_oper = &pAssocRsp->VHTOperation;
+       else if (pAssocRsp->vendor2_ie.VHTCaps.present)
+            vht_oper = &pAssocRsp->vendor2_ie.VHTOperation;
+       if ((vht_oper != NULL) &&
+		       (IS_DOT11_MODE_VHT(psessionEntry->dot11mode)) &&
+                                       vht_oper->present &&
+                                    psessionEntry->htSupportedChannelWidthSet)
+            pStaDs->vhtSupportedChannelWidthSet = vht_oper->chanWidth;
 
+       if ((vht_caps != NULL) && vht_caps->present) {
+           if (IS_DOT11_MODE_VHT(psessionEntry->dot11mode))
+                        pStaDs->mlmStaContext.vhtCapability =
+                                vht_caps->present;
+           /*
+            * If 11ac is supported and if the peer is
+            * sending VHT capabilities,
+            * then htMaxRxAMpduFactor should be
+            * overloaded with VHT maxAMPDULenExp
+            */
+            pStaDs->htMaxRxAMpduFactor = vht_caps->maxAMPDULenExp;
+       }
        if (limPopulatePeerRateSet(pMac, &pStaDs->supportedRates,
-                                pAssocRsp->HTCaps.supportedMCSSet,
-                                false,psessionEntry , &pAssocRsp->VHTCaps) != eSIR_SUCCESS)
+                pAssocRsp->HTCaps.supportedMCSSet,
+                false, psessionEntry,
+                vht_caps) != eSIR_SUCCESS) {
+                limLog(pMac, LOGP,
+                FL("could not get rateset and extended rate set"));
+                return;
+       }
 #else
        if (limPopulatePeerRateSet(pMac, &pStaDs->supportedRates, pAssocRsp->HTCaps.supportedMCSSet, false,psessionEntry) != eSIR_SUCCESS)
-#endif
        {
            limLog(pMac, LOGP, FL("could not get rateset and extended rate set"));
            return;
        }
 
+#endif
 #ifdef WLAN_FEATURE_11AC
         pStaDs->vhtSupportedRxNss = ((pStaDs->supportedRates.vhtRxMCSMap & MCSMAPMASK2x2)
                                                                 == MCSMAPMASK2x2) ? 1 : 2;
@@ -361,10 +379,6 @@ limProcessAssocRspFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tANI_U8 sub
         limLog(pMac, LOGE,
                FL("LFR3: Reassoc response packet header is NULL"));
         return;
-    } else if ( pHdr->sa == NULL) {
-        limLog(pMac, LOGE,
-               FL("LFR3: Reassoc response packet source address is NULL"));
-        return;
     }
 
     limLog(pMac, LOG1,
@@ -494,9 +508,8 @@ limProcessAssocRspFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tANI_U8 sub
 #endif
     pBody = WDA_GET_RX_MPDU_DATA(pRxPacketInfo);
 
-    // parse Re/Association Response frame.
     if (sirConvertAssocRespFrame2Struct(
-                        pMac, pBody, frameLen, pAssocRsp) == eSIR_FAILURE)
+                        pMac, psessionEntry, pBody, frameLen, pAssocRsp) == eSIR_FAILURE)
     {
         vos_mem_free(pAssocRsp);
         PELOGE(limLog(pMac, LOGE, FL("Parse error Assoc resp subtype %d,"
@@ -521,18 +534,21 @@ limProcessAssocRspFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tANI_U8 sub
         "and setting NULL"));
         vos_mem_free(psessionEntry->assocRsp);
         psessionEntry->assocRsp = NULL;
+        psessionEntry->assocRspLen = 0;
     }
 
-    psessionEntry->assocRsp = vos_mem_malloc(frameLen);
-    if (NULL == psessionEntry->assocRsp)
-    {
-        PELOGE(limLog(pMac, LOGE, FL("Unable to allocate memory to store assoc response, len = %d"), frameLen);)
-    }
-    else
-    {
-        //Store the Assoc response. This is sent to csr/hdd in join cnf response.
-        vos_mem_copy(psessionEntry->assocRsp, pBody, frameLen);
-        psessionEntry->assocRspLen = frameLen;
+    if (frameLen) {
+        psessionEntry->assocRsp = vos_mem_malloc(frameLen);
+        if (NULL == psessionEntry->assocRsp)
+        {
+            PELOGE(limLog(pMac, LOGE, FL("Unable to allocate memory to store assoc response, len = %d"), frameLen);)
+        }
+        else
+        {
+            //Store the Assoc response. This is sent to csr/hdd in join cnf response.
+            vos_mem_copy(psessionEntry->assocRsp, pBody, frameLen);
+            psessionEntry->assocRspLen = frameLen;
+        }
     }
 
 #ifdef WLAN_FEATURE_VOWIFI_11R
@@ -540,6 +556,7 @@ limProcessAssocRspFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tANI_U8 sub
     {
         vos_mem_free(psessionEntry->ricData);
         psessionEntry->ricData = NULL;
+        psessionEntry->RICDataLen = 0;
     }
     if(pAssocRsp->ricPresent) {
         psessionEntry->RICDataLen =
@@ -585,6 +602,7 @@ limProcessAssocRspFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tANI_U8 sub
     {
         vos_mem_free(psessionEntry->tspecIes);
         psessionEntry->tspecIes = NULL;
+        psessionEntry->tspecLen = 0;
     }
     if(pAssocRsp->tspecPresent) {
         limLog(pMac, LOG1, FL("Tspec EID present in assoc rsp"));
@@ -699,6 +717,20 @@ limProcessAssocRspFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tANI_U8 sub
         limSendDisassocMgmtFrame(pMac, eSIR_MAC_UNSPEC_FAILURE_REASON,
                                  pHdr->sa, psessionEntry, FALSE);
 
+        goto assocReject;
+    }
+
+    if (!lim_verify_fils_params_assoc_rsp(pMac, psessionEntry,
+                                       pAssocRsp, &mlmAssocCnf))
+    {
+        /* Log error */
+        PELOGW(limLog(pMac, LOGE, "FILS params doesnot match");)
+        mlmAssocCnf.resultCode = eSIR_SME_INVALID_ASSOC_RSP_RXED;
+        mlmAssocCnf.protStatusCode = eSIR_MAC_UNSPEC_FAILURE_STATUS;
+
+        /* Send advisory Disassociation frame to AP */
+        limSendDisassocMgmtFrame(pMac, eSIR_MAC_UNSPEC_FAILURE_REASON,
+                                 pHdr->sa, psessionEntry, FALSE);
         goto assocReject;
     }
     // Association Response received with success code
@@ -964,10 +996,10 @@ limProcessAssocRspFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tANI_U8 sub
     limUpdateAssocStaDatas(pMac, pStaDs, pAssocRsp,psessionEntry);
     // Extract the AP capabilities from the beacon that was received earlier
     // TODO - Watch out for an error response!
-    limExtractApCapabilities( pMac,
-                            (tANI_U8 *) psessionEntry->pLimJoinReq->bssDescription.ieFields,
-                            limGetIElenFromBssDescription( &psessionEntry->pLimJoinReq->bssDescription ),
-                            pBeaconStruct );
+    limExtractApCapabilities(pMac,
+      (tANI_U8 *) psessionEntry->pLimJoinReq->bssDescription.ieFields,
+      GET_IE_LEN_IN_BSS(psessionEntry->pLimJoinReq->bssDescription.length),
+      pBeaconStruct);
 
     if (pBeaconStruct->VHTCaps.present)
         psessionEntry->vht_caps = pBeaconStruct->VHTCaps;

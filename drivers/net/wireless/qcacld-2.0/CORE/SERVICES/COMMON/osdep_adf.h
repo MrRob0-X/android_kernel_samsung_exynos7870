@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2014, 2017-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -65,6 +65,7 @@
 
 #include "if_upperproto.h"
 #include "ah_osdep.h"
+#include <adf_os_lock.h>
 
 #ifdef AR9100
 #include <ar9100.h>
@@ -277,6 +278,7 @@ typedef rwlock_t usb_readwrite_lock_t;
 
 #ifdef CONFIG_SMP
 /* Undo the one provided by the kernel to debug spin locks */
+#if 0
 #undef spin_lock
 #undef spin_unlock
 #undef spin_trylock
@@ -290,13 +292,14 @@ do { \
 do { \
 if (!spin_is_locked(x)) { \
 WARN_ON(1); \
-printk(KERN_EMERG " %s:%d unlock addr=%p, %s \n", __func__, __LINE__, x, \
+printk(KERN_EMERG " %s:%d unlock addr=%pK, %s \n", __func__, __LINE__, x, \
 !spin_is_locked(x)? "Not locked":""); \
 } \
 spin_unlock_bh(x);\
 } while (0)
 
 #define spin_trylock(x) spin_trylock_bh(x)
+#endif
 
 #define OS_SUPPORT_ASYNC_Q 1 /* support for handling asyn function calls */
 
@@ -465,7 +468,7 @@ typedef struct {
     os_tasklet_routine_t    routine;
     atomic_t                queued;
     void                    *data;
-    spinlock_t              lock;
+    adf_os_spinlock_t              lock;
 } os_task_t;
 
 typedef struct _os_schedule_routing_mesg {
@@ -492,8 +495,8 @@ typedef struct {
     u_int8_t                    *mesg_queue_buf;
     STAILQ_HEAD(, _os_mesg_t)    mesg_head;        /* queued mesg buffers */
     STAILQ_HEAD(, _os_mesg_t)    mesg_free_head;   /* free mesg buffers  */
-    spinlock_t                  lock;
-    spinlock_t                  ev_handler_lock;
+    adf_os_spinlock_t           lock;
+    adf_os_spinlock_t           ev_handler_lock;
 #ifdef USE_SOFTINTR
     void                        *_task;
 #else
@@ -634,8 +637,13 @@ typedef dma_addr_t * dma_context_t;
 
 #define OS_DECLARE_TIMER(_fn)                  void _fn(void *)
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+#define OS_TIMER_FUNC(_fn)                     \
+    void _fn(struct timer_list *t)
+#else
 #define OS_TIMER_FUNC(_fn)                     \
     void _fn(void *timer_arg)
+#endif
 
 #define OS_GET_TIMER_ARG(_arg, _type)          \
     (_arg) = (_type)(timer_arg)
@@ -677,16 +685,24 @@ typedef enum _mesgq_event_delivery_type {
  */
 
 static INLINE void
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+os_mesgq_handler(struct timer_list *t)
+#else
 os_mesgq_handler(void *timer_arg)
+#endif
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+    os_mesg_queue_t    *queue = from_timer(queue, t, _timer);
+#else
     os_mesg_queue_t    *queue = (os_mesg_queue_t*)timer_arg;
+#endif
     os_mesg_t          *mesg = NULL;
     void               *msg;
 
     /*
      * Request access to message queue to retrieve message for processing
      */
-    spin_lock(&(queue->lock));
+    adf_os_spin_lock(&(queue->lock));
 
     mesg = STAILQ_FIRST(&queue->mesg_head);
     while(mesg) {
@@ -699,19 +715,19 @@ os_mesgq_handler(void *timer_arg)
         /*
          * Release access to message queue before processing message
          */
-        spin_unlock(&(queue->lock));
+        adf_os_spin_unlock(&(queue->lock));
 
         /*
          * Ensure just one message can be processes at a time.
          */
-        spin_lock(&(queue->ev_handler_lock));
+        adf_os_spin_lock(&(queue->ev_handler_lock));
         queue->handler(queue->ctx,mesg->mesg_type,mesg->mesg_len, msg);
-        spin_unlock(&(queue->ev_handler_lock));
+        adf_os_spin_unlock(&(queue->ev_handler_lock));
 
         /*
          * Request access to message queue to retrieve next message
          */
-        spin_lock(&(queue->lock));
+        adf_os_spin_lock(&(queue->lock));
         queue->num_queued--;
         STAILQ_INSERT_TAIL(&queue->mesg_free_head,mesg, mesg_next);
         mesg = STAILQ_FIRST(&queue->mesg_head);
@@ -720,7 +736,7 @@ os_mesgq_handler(void *timer_arg)
     /*
      * Release message queue
      */
-    spin_unlock(&(queue->lock));
+    adf_os_spin_unlock(&(queue->lock));
 }
 
 /*
@@ -748,8 +764,8 @@ static INLINE int OS_MESGQ_INIT(osdev_t devhandle, os_mesg_queue_t *queue,
     queue->dev_handle = devhandle;
     STAILQ_INIT(&queue->mesg_head);
     STAILQ_INIT(&queue->mesg_free_head);
-    spin_lock_init(&(queue->lock));
-    spin_lock_init(&(queue->ev_handler_lock));
+    adf_os_spinlock_init(&(queue->lock));
+    adf_os_spinlock_init(&(queue->ev_handler_lock));
     mesg = (os_mesg_t *)queue->mesg_queue_buf;
     for (i=0;i<max_queued;++i) {
         STAILQ_INSERT_TAIL(&queue->mesg_free_head,mesg,mesg_next);
@@ -785,7 +801,7 @@ static INLINE int OS_MESGQ_SEND(os_mesg_queue_t *queue,u_int16_t type, u_int16_t
 {
     os_mesg_t *mesg;
 
-    spin_lock(&(queue->lock));
+    adf_os_spin_lock(&(queue->lock));
     if (queue->is_synchronous ) {
         queue->handler(queue->ctx,type,len, msg);
     } else {
@@ -801,7 +817,7 @@ static INLINE int OS_MESGQ_SEND(os_mesg_queue_t *queue,u_int16_t type, u_int16_t
             STAILQ_INSERT_TAIL(&queue->mesg_head, mesg, mesg_next);
             queue->num_queued++;
         } else {
-            spin_unlock(&(queue->lock));
+            adf_os_spin_unlock(&(queue->lock));
             printk("No more message queue buffers !!! \n");
             return -ENOMEM;
         }
@@ -814,7 +830,7 @@ static INLINE int OS_MESGQ_SEND(os_mesg_queue_t *queue,u_int16_t type, u_int16_t
 #endif
         }
     }
-    spin_unlock(&(queue->lock));
+    adf_os_spin_unlock(&(queue->lock));
     return 0;
 }
 
@@ -842,7 +858,7 @@ static INLINE void OS_MESGQ_DRAIN(os_mesg_queue_t *queue, os_mesg_handler_t msg_
     os_mesg_t *mesg = NULL;
     void *msg;
 
-    spin_lock(&(queue->lock));
+    adf_os_spin_lock(&(queue->lock));
 #ifndef USE_SOFTINTR
     OS_CANCEL_TIMER(&queue->_timer);
 #endif
@@ -862,7 +878,7 @@ static INLINE void OS_MESGQ_DRAIN(os_mesg_queue_t *queue, os_mesg_handler_t msg_
         mesg = STAILQ_FIRST(&queue->mesg_head);
     };
     STAILQ_INIT(&queue->mesg_head);
-    spin_unlock(&(queue->lock));
+    adf_os_spin_unlock(&(queue->lock));
 }
 
 
@@ -874,7 +890,7 @@ static INLINE void OS_MESGQ_DRAIN(os_mesg_queue_t *queue, os_mesg_handler_t msg_
 
 static INLINE void OS_MESGQ_DESTROY(os_mesg_queue_t *queue)
 {
-    spin_lock(&(queue->lock));
+    adf_os_spin_lock(&(queue->lock));
 #ifdef USE_SOFTINTR
     softintr_disestablish(queue->_task);
 #else
@@ -887,9 +903,9 @@ static INLINE void OS_MESGQ_DESTROY(os_mesg_queue_t *queue)
 #ifndef USE_SOFTINTR
     OS_FREE_TIMER(&queue->_timer);
 #endif
-    spin_unlock(&(queue->lock));
-    spin_lock_destroy(&(queue->lock));
-    spin_lock_destroy(&(queue->ev_handler_lock));
+    adf_os_spin_unlock(&(queue->lock));
+    adf_os_spinlock_destroy(&(queue->lock));
+    adf_os_spinlock_destroy(&(queue->ev_handler_lock));
 }
 
 

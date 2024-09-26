@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014, 2016-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -654,7 +654,7 @@ tANI_BOOLEAN pmcPowerSaveCheck (tHalHandle hHal)
         {
             if (!checkRoutine(pPowerSaveCheckEntry->checkContext))
             {
-                pmcLog(pMac, LOGE, FL("pmcPowerSaveCheck fail!"));
+                pmcLog(pMac, LOG1, FL("pmcPowerSaveCheck fail!"));
                 bResult = FALSE;
                 break;
             }
@@ -982,10 +982,13 @@ void pmcTrafficTimerExpired (tHalHandle hHal)
         return;
     }
 
-    /* Until DHCP is not completed remain in power active */
-    if(pMac->pmc.remainInPowerActiveTillDHCP)
-    {
-        pmcLog(pMac, LOG2, FL("BMPS Traffic Timer expired before DHCP completion ignore enter BMPS"));
+    /* Untill DHCP and set key is not completed remain in power active */
+    if (pMac->pmc.remainInPowerActiveTillDHCP ||
+       pMac->pmc.full_power_till_set_key) {
+        pmcLog(pMac, LOG2,
+          FL("BMPS Traffic Timer expired before DHCP(%d) or set key (%d) completion ignore enter BMPS"),
+          pMac->pmc.remainInPowerActiveTillDHCP,
+          pMac->pmc.full_power_till_set_key);
         pMac->pmc.remainInPowerActiveThreshold++;
         if( pMac->pmc.remainInPowerActiveThreshold >= DHCP_REMAIN_POWER_ACTIVE_THRESHOLD)
         {
@@ -993,6 +996,7 @@ void pmcTrafficTimerExpired (tHalHandle hHal)
                   FL("Remain in power active DHCP threshold reached FALLBACK to enable enter BMPS"));
            /*FALLBACK: reset the flag to make BMPS entry possible*/
            pMac->pmc.remainInPowerActiveTillDHCP = FALSE;
+           pMac->pmc.full_power_till_set_key = false;
            pMac->pmc.remainInPowerActiveThreshold = 0;
         }
         //Activate the Traffic Timer again for entering into BMPS
@@ -1029,8 +1033,12 @@ void pmcTrafficTimerExpired (tHalHandle hHal)
     }
     else
     {
-        /*Some module voted against Power Save. So timer should be restarted again to retry BMPS */
-        pmcLog(pMac, LOGE, FL("Power Save check failed. Retry BMPS again later"));
+        /*
+         * Some module voted against Power Save.
+         * So timer should be restarted again to retry BMPS
+         */
+        pmcLog(pMac, LOGW,
+              FL("Power Save check failed. Retry BMPS again later"));
         //Since hTrafficTimer is a vos_timer now, we need to restart the timer here
         vosStatus = vos_timer_start(&pMac->pmc.hTrafficTimer, pMac->pmc.bmpsConfig.trafficMeasurePeriod);
         if ( !VOS_IS_STATUS_SUCCESS(vosStatus) && (VOS_STATUS_E_ALREADY != vosStatus) )
@@ -1189,77 +1197,36 @@ eHalStatus pmcEnterRequestStartUapsdState (tHalHandle hHal)
          else
          {
             pMac->pmc.uapsdSessionRequired = TRUE;
-            //Check BTC state
-#ifndef WLAN_MDM_CODE_REDUCTION_OPT
-            if( btcIsReadyForUapsd( pMac ) )
-#endif /* WLAN_MDM_CODE_REDUCTION_OPT*/
+
+            /* Put device in BMPS mode first. This step should NEVER fail.
+               That is why no need to buffer the UAPSD request*/
+            if(pmcEnterRequestBmpsState(hHal) != eHAL_STATUS_SUCCESS)
             {
-               /* Put device in BMPS mode first. This step should NEVER fail.
-                  That is why no need to buffer the UAPSD request*/
-               if(pmcEnterRequestBmpsState(hHal) != eHAL_STATUS_SUCCESS)
-               {
-                   pmcLog(pMac, LOGE, "PMC: Device in Full Power. Enter Request Bmps failed. "
-                            "UAPSD request will be dropped ");
-                  return eHAL_STATUS_FAILURE;
-               }
+                pmcLog(pMac, LOGE, "PMC: Device in Full Power. Enter Request Bmps failed. "
+                         "UAPSD request will be dropped ");
+                return eHAL_STATUS_FAILURE;
             }
-#ifndef WLAN_MDM_CODE_REDUCTION_OPT
-            else
-            {
-               (void)pmcStartTrafficTimer(hHal, pMac->pmc.bmpsConfig.trafficMeasurePeriod);
-            }
-#endif /* WLAN_MDM_CODE_REDUCTION_OPT*/
          }
          break;
 
       case BMPS:
-         //It is already in BMPS mode, check BTC state
-#ifndef WLAN_MDM_CODE_REDUCTION_OPT
-         if( btcIsReadyForUapsd(pMac) )
-#endif /* WLAN_MDM_CODE_REDUCTION_OPT*/
-         {
             /* Tell MAC to have device enter UAPSD mode. */
-            if (pmcIssueCommand(hHal, 0, eSmeCommandEnterUapsd, NULL, 0, FALSE)
-                                != eHAL_STATUS_SUCCESS)
-            {
-               pmcLog(pMac, LOGE, "PMC: failure to send message "
-                  "eWNI_PMC_ENTER_BMPS_REQ");
-               return eHAL_STATUS_FAILURE;
-            }
-         }
-#ifndef WLAN_MDM_CODE_REDUCTION_OPT
-         else
+         if (pmcIssueCommand(hHal, 0, eSmeCommandEnterUapsd, NULL, 0, FALSE)
+                             != eHAL_STATUS_SUCCESS)
          {
-            //Not ready for UAPSD at this time, save it first and wake up the chip
-            pmcLog(pMac, LOGE, " PMC state = %d",pMac->pmc.pmcState);
-            pMac->pmc.uapsdSessionRequired = TRUE;
-            /* While BTC traffic is going on, STA can be in BMPS
-             * and need not go to Full Power */
-            //fFullPower = VOS_TRUE;
+            pmcLog(pMac, LOGE, "PMC: failure to send message "
+                  "eWNI_PMC_ENTER_BMPS_REQ");
+            return eHAL_STATUS_FAILURE;
          }
-#endif /* WLAN_MDM_CODE_REDUCTION_OPT*/
          break;
 
       case REQUEST_START_UAPSD:
-#ifndef WLAN_MDM_CODE_REDUCTION_OPT
-         if( !btcIsReadyForUapsd(pMac) )
-         {
-            //BTC rejects UAPSD, bring it back to full power
-            fFullPower = VOS_TRUE;
-         }
-#endif
+
          break;
 
       case REQUEST_BMPS:
         /* Buffer request for UAPSD mode. */
         pMac->pmc.uapsdSessionRequired = TRUE;
-#ifndef WLAN_MDM_CODE_REDUCTION_OPT
-        if( !btcIsReadyForUapsd(pMac) )
-         {
-            //BTC rejects UAPSD, bring it back to full power
-            fFullPower = VOS_TRUE;
-         }
-#endif /* WLAN_MDM_CODE_REDUCTION_OPT*/
         break;
 
       default:
@@ -2491,9 +2458,6 @@ eHalStatus pmcEnterImpsCheck( tpAniSirGlobal pMac )
  * Note when device is in BMPS/UAPSD states, this API returns failure because it
  * is not ok to issue a BMPS request.
  */
-#ifdef CONFIG_SEC
-extern int csrRoamCheckBSSID(tSirMacAddr bssid);
-#endif /* CONFIG_SEC */
 eHalStatus pmcEnterBmpsCheck( tpAniSirGlobal pMac )
 {
 
@@ -2515,7 +2479,8 @@ eHalStatus pmcEnterBmpsCheck( tpAniSirGlobal pMac )
    /* Check that we are associated with a single active session. */
    if (!pmcValidateConnectState( pMac ))
    {
-      pmcLog(pMac, LOGE, "PMC: STA not associated with an AP with single active session. BMPS cannot be entered");
+      pmcLog(pMac, VOS_TRACE_LEVEL_INFO,
+                 "PMC: STA not associated with an AP with single active session. BMPS cannot be entered");
       return eHAL_STATUS_FAILURE;
    }
 
@@ -2532,21 +2497,6 @@ eHalStatus pmcEnterBmpsCheck( tpAniSirGlobal pMac )
       pmcLog(pMac, LOGE, "PMC: Power save check failed. BMPS cannot be entered now");
       return eHAL_STATUS_PMC_NOT_NOW;
    }
-#ifdef CONFIG_SEC
-	{
-       int i;
-       for( i = 0; i < CSR_ROAM_SESSION_MAX; i++ )
-       {
-           if( CSR_IS_SESSION_VALID( pMac, i ) && csrIsConnStateConnectedInfra( pMac, i ) )
-           {
-               if (csrRoamCheckBSSID(pMac->roam.roamSession[i].pConnectBssDesc->bssId))
-               {
-                   return eHAL_STATUS_FAILURE;
-               }
-           }
-        }
-    }
-#endif /* CONFIG_SEC */
 
     //Remove this code once SLM_Sessionization is supported
     //BMPS_WORKAROUND_NOT_NEEDED
@@ -2602,9 +2552,10 @@ tANI_BOOLEAN pmcShouldBmpsTimerRun( tpAniSirGlobal pMac )
      * an Infra session */
     if (!csrIsInfraConnected(pMac))
     {
-        pmcLog(pMac, LOG1, FL("No Infra Session or multiple sessions. BMPS should not be started"));
+        pmcLog(pMac, LOG1, FL("No Infra Session. BMPS can't be started"));
         return eANI_BOOLEAN_FALSE;
     }
+
     return eANI_BOOLEAN_TRUE;
 }
 
@@ -3213,6 +3164,7 @@ eHalStatus pmcOffloadDisableStaPsHandler(tpAniSirGlobal pMac,
      * honored
      */
     pmc->configStaPsEnabled = FALSE;
+    pmc->configDefStaPsEnabled = FALSE;
 
     /*
      * Check whether the give session is Infra and in Connected State
@@ -3267,13 +3219,18 @@ void pmcOffloadAutoPsEntryTimerExpired(void *pmcInfo)
 {
     tpPsOffloadPerSessionInfo pmc = (tpPsOffloadPerSessionInfo)pmcInfo;
     tpAniSirGlobal pMac = pmc->pMac;
+    eHalStatus status;
 
     smsLog(pMac, LOG2, FL("Auto PS timer expired"));
 
-    if(eHAL_STATUS_FAILURE == pmcOffloadEnableStaPsHandler(pMac,
-                                                pmc->sessionId))
-    {
+    status = pmcOffloadEnableStaPsHandler(pMac, pmc->sessionId);
+
+    if (eHAL_STATUS_FAILURE == status) {
         smsLog(pMac, LOGE, FL("Auto PS timer expired in wrong state"));
+    }
+    else if ((eHAL_STATUS_SUCCESS == status) ||
+            (eHAL_STATUS_PMC_NOT_NOW == status)) {
+        pmc->configStaPsEnabled = TRUE;
     }
 }
 
@@ -3376,9 +3333,14 @@ eHalStatus pmcOffloadExitPowersaveState(tpAniSirGlobal pMac, tANI_U32 sessionId)
      /* Call Full Power Req Cbs */
      pmcOffloadDoFullPowerCallbacks(pMac, sessionId, eHAL_STATUS_SUCCESS);
 
-     if (pmc->configStaPsEnabled || pmc->configDefStaPsEnabled)
+     if (pmc->configStaPsEnabled || pmc->configDefStaPsEnabled) {
+        if (true == vos_is_mon_enable()) {
+           smsLog(pMac, LOGE, FL("Montior is enabled, skip start StaPsTimer"));
+           return eHAL_STATUS_SUCCESS;
+        }
         pmcOffloadStartAutoStaPsTimer(pMac, sessionId,
                                       pmc->autoPsEntryTimerPeriod);
+        }
      else
         smsLog(pMac, LOGE, FL("Master Sta Ps Disabled"));
      return eHAL_STATUS_SUCCESS;

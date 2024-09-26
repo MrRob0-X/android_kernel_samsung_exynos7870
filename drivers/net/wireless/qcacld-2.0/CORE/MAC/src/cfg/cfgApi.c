@@ -50,8 +50,6 @@ static tANI_U32  __gCfgIBufMax[CFG_STA_IBUF_MAX_SIZE]          ;
 static tANI_U32  __gCfgIBuf[CFG_STA_IBUF_MAX_SIZE]             ;
 static tANI_U8   __gCfgSBuf[CFG_STA_SBUF_MAX_SIZE]             ;
 static tANI_U8   __gSBuffer[CFG_MAX_STR_LEN]                   ;
-static tANI_U32  __gParamList[WNI_CFG_MAX_PARAM_NUM +
-                              WNI_CFG_GET_PER_STA_STAT_RSP_NUM];
 
 static void Notify(tpAniSirGlobal, tANI_U16, tANI_U32);
 
@@ -142,7 +140,6 @@ tSirRetStatus cfgInit(tpAniSirGlobal pMac)
     pMac->cfg.gCfgSBuf     = __gCfgSBuf;
     pMac->cfg.gSBuffer     = __gSBuffer;
     pMac->cfg.gCfgEntry    = __gCfgEntry;
-    pMac->cfg.gParamList   = __gParamList;
 
     pMac->cfg.gCfgMaxIBufSize = CFG_STA_IBUF_MAX_SIZE;
     pMac->cfg.gCfgMaxSBufSize = CFG_STA_SBUF_MAX_SIZE;
@@ -166,7 +163,6 @@ void cfgDeInit(tpAniSirGlobal pMac)
    pMac->cfg.gCfgSBuf     = NULL;
    pMac->cfg.gSBuffer     = NULL;
    pMac->cfg.gCfgEntry    = NULL;
-   pMac->cfg.gParamList   = NULL;
 }
 
 // ---------------------------------------------------------------------
@@ -876,7 +872,8 @@ cfgGetCapabilityInfo(tpAniSirGlobal pMac, tANI_U16 *pCap,tpPESession sessionEntr
              LIM_IS_BT_AMP_STA_ROLE(sessionEntry) ||
              LIM_IS_STA_ROLE(sessionEntry))
         pCapInfo->ess = 1; // ESS bit
-    else if (LIM_IS_P2P_DEVICE_ROLE(sessionEntry)) {
+    else if (LIM_IS_P2P_DEVICE_ROLE(sessionEntry) ||
+             LIM_IS_NDI_ROLE(sessionEntry)) {
         pCapInfo->ess = 0;
         pCapInfo->ibss = 0;
     }
@@ -1085,8 +1082,6 @@ Notify(tpAniSirGlobal pMac, tANI_U16 cfgId, tANI_U32 ntfMask)
     mmhMsg.bodyval = (tANI_U32)cfgId;
     mmhMsg.bodyptr = NULL;
 
-    MTRACE(macTraceMsgTx(pMac, NO_SESSION, mmhMsg.type));
-
     if ((ntfMask & CFG_CTL_NTF_SCH) != 0)
         schPostMessage(pMac, &mmhMsg);
 
@@ -1137,8 +1132,9 @@ uint8_t* cfg_get_vendor_ie_ptr_from_oui(tpAniSirGlobal mac_ctx,
 			return NULL;
 		}
 		if (SIR_MAC_EID_VENDOR == elem_id) {
-			if(memcmp(&ptr[2], oui, oui_size)==0)
-			return ptr;
+			if((elem_len>=oui_size) &&
+				(memcmp(&ptr[2], oui, oui_size)==0))
+				return ptr;
 		}
 
 		left -= elem_len;

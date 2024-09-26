@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014,2016, 2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -33,8 +33,8 @@
 #include "csrInsideApi.h"
 #include "smeInside.h"
 #include "p2p_Api.h"
-#include "limApi.h"
 #include "cfgApi.h"
+#include "wma.h"
 
 
 eHalStatus p2pProcessNoAReq(tpAniSirGlobal pMac, tSmeCmd *pNoACmd);
@@ -186,49 +186,6 @@ eHalStatus sme_remainOnChnRsp( tpAniSirGlobal pMac, tANI_U8 *pMsg)
     return status;
 }
 
-
-/*------------------------------------------------------------------
- *
- * Handle the Mgmt frm ind from LIM and forward to HDD.
- *
- *------------------------------------------------------------------*/
-
-eHalStatus sme_mgmtFrmInd( tHalHandle hHal, tpSirSmeMgmtFrameInd pSmeMgmtFrm)
-{
-    tpAniSirGlobal pMac = PMAC_STRUCT( hHal );
-    eHalStatus  status = eHAL_STATUS_SUCCESS;
-    tCsrRoamInfo pRoamInfo = {0};
-    tANI_U8 i = 0;
-    tANI_U32 SessionId = pSmeMgmtFrm->sessionId;
-
-    pRoamInfo.nFrameLength = pSmeMgmtFrm->mesgLen - sizeof(tSirSmeMgmtFrameInd);
-    pRoamInfo.pbFrames = pSmeMgmtFrm->frameBuf;
-    pRoamInfo.frameType = pSmeMgmtFrm->frameType;
-    pRoamInfo.rxChan   = pSmeMgmtFrm->rxChan;
-    pRoamInfo.rxRssi   = pSmeMgmtFrm->rxRssi;
-    if(CSR_IS_SESSION_ANY(SessionId))
-    {
-       for(i = 0; i < CSR_ROAM_SESSION_MAX; i++)
-       {
-          if(CSR_IS_SESSION_VALID(pMac, i))
-          {
-             SessionId = i;
-             break;
-          }
-       }
-    }
-
-    if (i == CSR_ROAM_SESSION_MAX) {
-        smsLog(pMac, LOGE, FL("No valid sessions found."));
-        return eHAL_STATUS_FAILURE;
-    }
-    /* forward the mgmt frame to HDD */
-    csrRoamCallCallback(pMac, SessionId, &pRoamInfo, 0, eCSR_ROAM_INDICATE_MGMT_FRAME, 0);
-
-    return status;
-}
-
-
 /*------------------------------------------------------------------
  *
  * Handle the remain on channel ready indication from PE
@@ -241,7 +198,11 @@ eHalStatus sme_remainOnChnReady( tHalHandle hHal, tANI_U8* pMsg)
     eHalStatus  status = eHAL_STATUS_SUCCESS;
     tListElem *pEntry = NULL;
     tSmeCmd *pCommand = NULL;
-    tCsrRoamInfo RoamInfo;
+    tCsrRoamInfo *roam_info;
+
+    roam_info = vos_mem_malloc(sizeof(*roam_info));
+    if (!roam_info)
+        return status;
 
     if (pMac->fP2pListenOffload)
         pEntry = csrLLPeekHead(&pMac->sme.smeScanCmdActiveList, LL_ACCESS_LOCK);
@@ -255,34 +216,15 @@ eHalStatus sme_remainOnChnReady( tHalHandle hHal, tANI_U8* pMsg)
         {
 
             /* forward the indication to HDD */
-            RoamInfo.pRemainCtx = pCommand->u.remainChlCmd.callbackCtx;
-            csrRoamCallCallback(pMac, ((tSirSmeRsp*)pMsg)->sessionId, &RoamInfo,
+            roam_info->pRemainCtx = pCommand->u.remainChlCmd.callbackCtx;
+            csrRoamCallCallback(pMac, ((tSirSmeRsp*)pMsg)->sessionId, roam_info,
                                 0, eCSR_ROAM_REMAIN_CHAN_READY, 0);
         }
     }
+    vos_mem_free(roam_info);
 
     return status;
 }
-
-
-eHalStatus sme_sendActionCnf( tHalHandle hHal, tANI_U8* pMsg)
-{
-   tpAniSirGlobal pMac = PMAC_STRUCT( hHal );
-   eHalStatus  status = eHAL_STATUS_SUCCESS;
-   tCsrRoamInfo RoamInfo;
-   tSirSmeRsp* pSmeRsp = (tSirSmeRsp*)pMsg;
-
-    /* forward the indication to HDD */
-    //RoamInfo can be passed as NULL....todo
-    csrRoamCallCallback(pMac, pSmeRsp->sessionId, &RoamInfo, 0,
-                        eCSR_ROAM_SEND_ACTION_CNF,
-                       (pSmeRsp->statusCode == eSIR_SME_SUCCESS) ? 0:
-                        eCSR_ROAM_RESULT_SEND_ACTION_FAIL);
-    return status;
-}
-
-
-
 
 eHalStatus sme_p2pOpen( tHalHandle hHal )
 {

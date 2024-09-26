@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -45,7 +45,6 @@
 #include <wlan_hdd_tx_rx.h>
 #include <wniApi.h>
 #include <wlan_nlink_srv.h>
-#include <wlan_btc_svc.h>
 #include <wlan_hdd_cfg.h>
 #include <wlan_ptt_sock_svc.h>
 #include <wlan_hdd_wowl.h>
@@ -53,9 +52,7 @@
 #include <wlan_hdd_wext.h>
 #include <linux/wireless.h>
 #include <net/cfg80211.h>
-#if defined(MSM_PLATFORM) && defined(HIF_PCI)
-#include <net/cnss.h>
-#endif /* MSM_PLATFORM */
+#include "vos_cnss.h"
 #include <linux/rtnetlink.h>
 #include <linux/semaphore.h>
 #include <linux/ctype.h>
@@ -67,6 +64,21 @@
 static int epping_start_adapter(epping_adapter_t *pAdapter);
 static void epping_stop_adapter(epping_adapter_t *pAdapter);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+static void epping_timer_expire(struct timer_list *t)
+{
+	epping_adapter_t *pAdapter = from_timer(pAdapter, t, epping_timer);
+
+	if (pAdapter == NULL) {
+		EPPING_LOG(VOS_TRACE_LEVEL_FATAL,
+			   "%s: adapter = NULL", __func__);
+		return;
+	}
+
+	pAdapter->epping_timer_state = EPPING_TX_TIMER_STOPPED;
+	epping_tx_timer_expire(pAdapter);
+}
+#else
 static void epping_timer_expire(void *data)
 {
    struct net_device *dev = (struct net_device *) data;
@@ -87,6 +99,7 @@ static void epping_timer_expire(void *data)
    pAdapter->epping_timer_state = EPPING_TX_TIMER_STOPPED;
    epping_tx_timer_expire(pAdapter);
 }
+#endif
 
 static int epping_ndev_open(struct net_device *dev)
 {
@@ -241,27 +254,35 @@ static int epping_set_mac_address(struct net_device *dev, void *addr)
 
 static void epping_stop_adapter(epping_adapter_t *pAdapter)
 {
+   struct device *dev;
+
    if (pAdapter && pAdapter->started) {
       EPPING_LOG(LOG1, FL("Disabling queues"));
       netif_tx_disable(pAdapter->dev);
       netif_carrier_off(pAdapter->dev);
       pAdapter->started = false;
-#if defined(MSM_PLATFORM) && defined(HIF_PCI) && defined(CONFIG_CNSS)
-      cnss_request_bus_bandwidth(CNSS_BUS_WIDTH_LOW);
+      dev = pAdapter->pEpping_ctx->parent_dev;
+#ifdef FEATURE_BUS_BANDWIDTH
+      if (dev)
+         vos_request_bus_bandwidth(dev, CNSS_BUS_WIDTH_LOW);
 #endif
    }
 }
 
 static int epping_start_adapter(epping_adapter_t *pAdapter)
 {
+   struct device *dev;
+
    if (!pAdapter) {
       EPPING_LOG(VOS_TRACE_LEVEL_FATAL,
          "%s: pAdapter= NULL\n", __func__);
       return -1;
    }
    if (!pAdapter->started) {
-#if defined(MSM_PLATFORM) && defined(HIF_PCI) && defined(CONFIG_CNSS)
-      cnss_request_bus_bandwidth(CNSS_BUS_WIDTH_HIGH);
+      dev = pAdapter->pEpping_ctx->parent_dev;
+#ifdef FEATURE_BUS_BANDWIDTH
+      if (dev)
+         vos_request_bus_bandwidth(dev, CNSS_BUS_WIDTH_HIGH);
 #endif
       netif_carrier_on(pAdapter->dev);
       EPPING_LOG(LOG1, FL("Enabling queues"));
@@ -269,7 +290,7 @@ static int epping_start_adapter(epping_adapter_t *pAdapter)
       pAdapter->started = true;
    } else {
       EPPING_LOG(VOS_TRACE_LEVEL_WARN,
-         "%s: pAdapter %p already started\n", __func__, pAdapter);
+         "%s: pAdapter %pK already started\n", __func__, pAdapter);
    }
    return 0;
 }

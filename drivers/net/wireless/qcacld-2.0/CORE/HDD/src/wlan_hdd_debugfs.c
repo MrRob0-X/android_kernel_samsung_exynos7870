@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -29,10 +29,26 @@
 #include <wlan_hdd_includes.h>
 #include <wlan_hdd_wowl.h>
 #include <vos_sched.h>
+#include "wlan_hdd_debugfs.h"
+#include "wlan_hdd_debugfs_ocb.h"
+#include "wlan_hdd_request_manager.h"
+#include "wdi_in.h"
+#include "ol_txrx_types.h"
+#include "vos_types.h"
+
 
 #define MAX_USER_COMMAND_SIZE_WOWL_ENABLE 8
 #define MAX_USER_COMMAND_SIZE_WOWL_PATTERN 512
-#define MAX_USER_COMMAND_SIZE_FRAME 4096
+
+#ifdef MULTI_IF_NAME
+#define HDD_DEBUGFS_DIRNAME "wlan_wcnss" MULTI_IF_NAME
+#else
+#define HDD_DEBUGFS_DIRNAME "wlan_wcnss"
+#endif
+
+#ifdef WLAN_POWER_DEBUGFS
+#define POWER_DEBUGFS_BUFFER_MAX_LEN 4096
+#endif
 
 /**
  * __wcnss_wowenable_write() - write wow enable
@@ -535,13 +551,13 @@ static ssize_t wcnss_patterngen_write(struct file *file,
 }
 
 /**
- * __wcnss_debugfs_open() - open debugfs
+ * __wlan_hdd_debugfs_open() - open debugfs
  * @inode: inode pointer
  * @file: file pointer
  *
  * Return: 0 on success, error number otherwise
  */
-static int __wcnss_debugfs_open(struct inode *inode, struct file *file)
+static int __wlan_hdd_debugfs_open(struct inode *inode, struct file *file)
 {
 	hdd_adapter_t *adapter;
 	hdd_context_t *hdd_ctx;
@@ -570,48 +586,524 @@ static int __wcnss_debugfs_open(struct inode *inode, struct file *file)
 }
 
 /**
- * wcnss_debugfs_open() - SSR wrapper for __wcnss_debugfs_open
+ * wlan_hdd_debugfs_open() - SSR wrapper for __wlan_hdd_debugfs_open
  * @inode: inode pointer
  * @file: file pointer
  *
  * Return: 0 on success, error number otherwise
  */
-static int wcnss_debugfs_open(struct inode *inode, struct file *file)
+int wlan_hdd_debugfs_open(struct inode *inode, struct file *file)
 {
 	int ret;
 
 	vos_ssr_protect(__func__);
-	ret = __wcnss_debugfs_open(inode, file);
+	ret = __wlan_hdd_debugfs_open(inode, file);
 	vos_ssr_unprotect(__func__);
 
 	return ret;
 }
 
+#ifdef WLAN_POWER_DEBUGFS
+struct power_stats_priv {
+	struct power_stats_response power_stats;
+};
+
+static void hdd_power_debugstats_dealloc(void *priv)
+{
+	struct power_stats_priv *stats = priv;
+
+	if (stats->power_stats.debug_registers) {
+		vos_mem_free(stats->power_stats.debug_registers);
+		stats->power_stats.debug_registers = NULL;
+	}
+}
+
+static void hdd_power_debugstats_cb(struct power_stats_response *response,
+				    void *context)
+{
+	struct hdd_request *request;
+	struct power_stats_priv *priv;
+	uint32_t *debug_registers;
+	uint32_t debug_registers_len;
+
+	ENTER();
+
+	request = hdd_request_get(context);
+	if (!request) {
+		hddLog(LOGE, FL("Obsolete request"));
+		return;
+	}
+
+	priv = hdd_request_priv(request);
+
+	/* copy fixed-sized data */
+	priv->power_stats = *response;
+
+	/* copy variable-size data */
+	if (response->num_debug_register) {
+		debug_registers_len = (sizeof(response->debug_registers[0]) *
+				       response->num_debug_register);
+		debug_registers = vos_mem_malloc(debug_registers_len);
+		priv->power_stats.debug_registers = debug_registers;
+		if (debug_registers) {
+			vos_mem_copy(debug_registers,
+				     response->debug_registers,
+				     debug_registers_len);
+		} else {
+			hddLog(LOGE, FL("Power stats memory alloc fails!"));
+			priv->power_stats.num_debug_register = 0;
+		}
+	}
+	hdd_request_complete(request);
+	hdd_request_put(request);
+	EXIT();
+}
+
+/**
+ * __wlan_hdd_read_power_debugfs() - API to collect Chip power stats from FW
+ * @file: file pointer
+ * @buf: buffer
+ * @count: count
+ * @pos: position pointer
+ *
+ * Return: Number of bytes read on success, error number otherwise
+ */
+static ssize_t __wlan_hdd_read_power_debugfs(struct file *file,
+				char __user *buf,
+				size_t count, loff_t *pos)
+{
+	hdd_adapter_t *adapter;
+	hdd_context_t *hdd_ctx;
+	VOS_STATUS status;
+	struct power_stats_response *chip_power_stats;
+	ssize_t ret_cnt = 0;
+	int j;
+	unsigned int len = 0;
+	char *power_debugfs_buf = NULL;
+	void *cookie;
+	struct hdd_request *request;
+	struct power_stats_priv *priv;
+	static const struct hdd_request_params params = {
+		.priv_size = sizeof(*priv),
+		.timeout_ms = WLAN_WAIT_TIME_POWER_STATS,
+		.dealloc = hdd_power_debugstats_dealloc,
+	};
+
+	ENTER();
+	adapter = (hdd_adapter_t *)file->private_data;
+	if ((NULL == adapter) || (WLAN_HDD_ADAPTER_MAGIC != adapter->magic)) {
+		hddLog(LOGE,
+			FL("Invalid adapter or adapter has invalid magic"));
+		return -EINVAL;
+	}
+
+	hdd_ctx = WLAN_HDD_GET_CTX(adapter);
+	ret_cnt = wlan_hdd_validate_context(hdd_ctx);
+	if (0 != ret_cnt)
+		return ret_cnt;
+
+	request = hdd_request_alloc(&params);
+	if (!request) {
+		hddLog(LOGE, FL("Request allocation failure"));
+		return -ENOMEM;
+	}
+	vos_mem_zero(hdd_request_priv(request), sizeof(*priv));
+	cookie = hdd_request_cookie(request);
+
+	status = sme_power_debug_stats_req(hdd_ctx->hHal,
+					   hdd_power_debugstats_cb,
+					   cookie);
+	if (!VOS_IS_STATUS_SUCCESS(status)) {
+		hddLog(LOGE, FL("chip power stats request failed"));
+		ret_cnt = -EINVAL;
+		goto cleanup;
+	}
+
+	ret_cnt = hdd_request_wait_for_response(request);
+	if (ret_cnt) {
+		hddLog(LOGE, FL("Target response timed out Power stats"));
+		ret_cnt = -ETIMEDOUT;
+		goto cleanup;
+	}
+
+	priv = hdd_request_priv(request);
+	chip_power_stats = &priv->power_stats;
+
+	power_debugfs_buf = vos_mem_malloc(POWER_DEBUGFS_BUFFER_MAX_LEN);
+	if (!power_debugfs_buf) {
+		hddLog(LOGE, FL("Power stats buffer alloc fails!"));
+		ret_cnt = -EINVAL;
+		goto cleanup;
+	}
+
+	len += scnprintf(power_debugfs_buf, POWER_DEBUGFS_BUFFER_MAX_LEN,
+			"POWER DEBUG STATS\n=================\n"
+			"cumulative_sleep_time_ms: %d\n"
+			"cumulative_total_on_time_ms: %d\n"
+			"deep_sleep_enter_counter: %d\n"
+			"last_deep_sleep_enter_tstamp_ms: %d\n"
+			"debug_register_fmt: %d\n"
+			"num_debug_register: %d\n",
+			chip_power_stats->cumulative_sleep_time_ms,
+			chip_power_stats->cumulative_total_on_time_ms,
+			chip_power_stats->deep_sleep_enter_counter,
+			chip_power_stats->last_deep_sleep_enter_tstamp_ms,
+			chip_power_stats->debug_register_fmt,
+			chip_power_stats->num_debug_register);
+
+	for (j = 0; j < chip_power_stats->num_debug_register; j++) {
+		if ((POWER_DEBUGFS_BUFFER_MAX_LEN - len) > 0)
+			len += scnprintf(power_debugfs_buf + len,
+					POWER_DEBUGFS_BUFFER_MAX_LEN - len,
+					"debug_registers[%d]: 0x%x\n", j,
+					chip_power_stats->debug_registers[j]);
+		else
+			j = chip_power_stats->num_debug_register;
+	}
+
+	ret_cnt = simple_read_from_buffer(buf, count, pos,
+					power_debugfs_buf, len);
+cleanup:
+	if (power_debugfs_buf)
+		vos_mem_free(power_debugfs_buf);
+
+	hdd_request_put(request);
+
+	return ret_cnt;
+}
+
+/**
+ * wlan_hdd_read_power_debugfs() - SSR wrapper function to read power debugfs
+ * @file: file pointer
+ * @buf: buffer
+ * @count: count
+ * @pos: position pointer
+ *
+ * Return: Number of bytes read on success, error number otherwise
+ */
+static ssize_t wlan_hdd_read_power_debugfs(struct file *file,
+				char __user *buf,
+				size_t count, loff_t *pos)
+{
+	int ret;
+
+	vos_ssr_protect(__func__);
+	ret = __wlan_hdd_read_power_debugfs(file, buf, count, pos);
+	vos_ssr_unprotect(__func__);
+
+	return ret;
+}
+
+/**
+ * __wlan_hdd_open_power_debugfs() - Function to save private on open
+ * @inode: Pointer to inode structure
+ * @file: file pointer
+ *
+ * Return: zero
+ */
+static int __wlan_hdd_open_power_debugfs(struct inode *inode, struct file *file)
+{
+	file->private_data = inode->i_private;
+	return 0;
+}
+
+/**
+ * wlan_hdd_open_power_debugfs() - SSR wrapper function to save private on open
+ * @inode: Pointer to inode structure
+ * @file: file pointer
+ *
+ * Return: zero
+ */
+static int wlan_hdd_open_power_debugfs(struct inode *inode, struct file *file)
+{
+	int ret;
+
+	vos_ssr_protect(__func__);
+	ret = __wlan_hdd_open_power_debugfs(inode, file);
+	vos_ssr_unprotect(__func__);
+
+	return ret;
+}
+
+#endif
+
+
 static const struct file_operations fops_wowenable = {
     .write = wcnss_wowenable_write,
-    .open = wcnss_debugfs_open,
+    .open = wlan_hdd_debugfs_open,
     .owner = THIS_MODULE,
     .llseek = default_llseek,
 };
 
 static const struct file_operations fops_wowpattern = {
     .write = wcnss_wowpattern_write,
-    .open = wcnss_debugfs_open,
+    .open = wlan_hdd_debugfs_open,
     .owner = THIS_MODULE,
     .llseek = default_llseek,
 };
 
 static const struct file_operations fops_patterngen = {
     .write = wcnss_patterngen_write,
-    .open = wcnss_debugfs_open,
+    .open = wlan_hdd_debugfs_open,
     .owner = THIS_MODULE,
     .llseek = default_llseek,
 };
 
+#ifdef WLAN_POWER_DEBUGFS
+static const struct file_operations fops_powerdebugs = {
+	.read = wlan_hdd_read_power_debugfs,
+	.open = wlan_hdd_open_power_debugfs,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+/**
+ * wlan_hdd_init_power_stats_debugfs() - API to init power stats debugfs
+ *
+ * Return: VOS_STATUS
+ */
+static VOS_STATUS wlan_hdd_init_power_stats_debugfs(hdd_adapter_t *adapter,
+						    hdd_context_t *hdd_ctx)
+{
+	if (NULL == debugfs_create_file("power_stats",
+				S_IRUSR | S_IRGRP | S_IROTH,
+				hdd_ctx->debugfs_phy, adapter,
+				&fops_powerdebugs))
+		return VOS_STATUS_E_FAILURE;
+
+	return VOS_STATUS_SUCCESS;
+}
+
+/**
+ * wlan_hdd_deinit_power_stats_debugfs() - API to deinit power stats debugfs
+ *
+ * Return: None
+ */
+static void wlan_hdd_deinit_power_stats_debugfs(hdd_context_t *hdd_ctx)
+{
+}
+#else
+static VOS_STATUS wlan_hdd_init_power_stats_debugfs(hdd_adapter_t *adapter,
+						    hdd_context_t *hdd_ctx)
+{
+	return VOS_STATUS_SUCCESS;
+}
+
+static void wlan_hdd_deinit_power_stats_debugfs(hdd_context_t *hdd_ctx)
+{
+	return;
+}
+#endif
+
+#ifdef DEBUG_HL_LOGGING
+vos_lock_t *txqueue_stats_lock_ptr = NULL;
+static ssize_t __wlan_hdd_write_txqueue_stats_debugfs(struct file *file,
+						      const char __user *buf,
+						      size_t count,
+						      loff_t *ppos)
+{
+	char cmd[5];
+	char pattern_idx;
+	int ret = 0;
+	v_CONTEXT_t vos_context = vos_get_global_context(VOS_MODULE_ID_TXRX,
+							 NULL);
+	struct ol_txrx_pdev_t *pdev = vos_get_context(VOS_MODULE_ID_TXRX,
+							 vos_context);
+	if (!pdev) {
+		hddLog(VOS_TRACE_LEVEL_ERROR, FL("Failed to find pdev"));
+		return -ENODEV;
+	}
+
+	if (count > 2) {
+		hddLog(VOS_TRACE_LEVEL_ERROR, FL("error input data len %zu"),
+		       count);
+		return -EINVAL;
+	}
+
+	if (copy_from_user(cmd, buf, count))
+		return -EFAULT;
+	cmd[count] = '\0';
+
+	ret = kstrtou8(cmd, 0, &pattern_idx);
+	if (ret < 0) {
+		hddLog(LOGE, FL("kstrtou8 failed"));
+		return ret;
+	}
+
+	switch (pattern_idx) {
+	case 1:
+		wdi_in_clear_stats(pdev, WLAN_SCHEDULER_STATS);
+		break;
+	default:
+		hddLog(VOS_TRACE_LEVEL_ERROR, FL("unsupport parameter %d"),
+		       pattern_idx);
+		return -EINVAL;
+	}
+
+	return count;
+}
+
+static ssize_t wlan_hdd_write_txqueue_stats_debugfs(struct file *file,
+						    const char __user *buf,
+						    size_t count,
+						    loff_t *ppos)
+{
+	int ret = 0;
+
+	vos_lock_acquire(txqueue_stats_lock_ptr);
+	vos_ssr_protect(__func__);
+
+	ret = __wlan_hdd_write_txqueue_stats_debugfs(file, buf, count, ppos);
+
+	vos_ssr_unprotect(__func__);
+	vos_lock_release(txqueue_stats_lock_ptr);
+
+	return ret;
+}
+
+static ssize_t __wlan_hdd_read_txqueue_stats_debugfs(struct file *file,
+						     char __user *buf,
+						     size_t count,
+						     loff_t *pos)
+{
+	int i = 0;
+	int len = 0;
+	int to_user_data_len = 0;
+	char *tx_stats_buf = NULL;
+	struct driver_txq_states *tx_stats = NULL;
+	v_CONTEXT_t vos_context = vos_get_global_context(VOS_MODULE_ID_TXRX,
+							 NULL);
+	struct ol_txrx_pdev_t *pdev = vos_get_context(VOS_MODULE_ID_TXRX,
+							 vos_context);
+	if (!pdev) {
+		hddLog(VOS_TRACE_LEVEL_ERROR, FL("Failed to find pdev"));
+		return -ENODEV;
+	}
+
+	if (*pos != 0)
+		return 0;
+	tx_stats  = vos_mem_malloc(sizeof(*tx_stats) *
+				   (OL_TX_SCHED_WRR_ADV_NUM_CATEGORIES + 1));
+	if (!tx_stats) {
+		hddLog(VOS_TRACE_LEVEL_ERROR,
+		       FL("could not allocate mem for driver_txq_states"));
+		return -ENOMEM;
+	}
+
+	tx_stats_buf  = vos_mem_malloc(sizeof(*tx_stats_buf) * 512);
+	if (!tx_stats_buf) {
+		vos_mem_free(tx_stats);
+		hddLog(VOS_TRACE_LEVEL_ERROR,
+		       FL("alloc tx_stats_buf mem failed"));
+		return -ENOMEM;
+	}
+
+	wdi_in_get_stats(pdev, WLAN_SCHEDULER_STATS, (void *)tx_stats);
+
+	for (i = 0; i < 4; i++) {
+		hddLog(VOS_TRACE_LEVEL_INFO,
+		       FL("host driver %s queue wrr_count %d frms %d bytes %d"
+			  " active %d discard_frms %d tx pkt %d"),
+		       (tx_stats + i)->cat_name,
+		       (tx_stats + i)->wrr_count,
+		       (tx_stats + i)->pending_frms,
+		       (tx_stats + i)->pending_bytes,
+		       (tx_stats + i)->active,
+		       (tx_stats + i)->discard_frms,
+		       (tx_stats + i)->dispatched_frms);
+	}
+
+	for (i = 0; i < 4; i++) {
+		len += scnprintf(tx_stats_buf + len, 512,
+				 "host_driver_queue %s tx_msdu %d"
+				 " lost_msdu %d pending_msdu %d\n",
+				 (tx_stats + i)->cat_name,
+				 (tx_stats + i)->dispatched_frms,
+				 (tx_stats + i)->discard_frms,
+				 (tx_stats + i)->pending_frms);
+	}
+	to_user_data_len = simple_read_from_buffer(buf, count, pos,
+						   tx_stats_buf, len);
+	vos_mem_free(tx_stats);
+	vos_mem_free(tx_stats_buf);
+	return to_user_data_len;
+}
+
+static ssize_t wlan_hdd_read_txqueue_stats_debugfs(struct file *file,
+						   char __user *buf,
+						   size_t count, loff_t *pos)
+{
+	int ret;
+
+	vos_lock_acquire(txqueue_stats_lock_ptr);
+	vos_ssr_protect(__func__);
+
+	ret = __wlan_hdd_read_txqueue_stats_debugfs(file, buf, count, pos);
+
+	vos_ssr_unprotect(__func__);
+	vos_lock_release(txqueue_stats_lock_ptr);
+
+	return ret;
+}
+
+static const struct file_operations fops_txqueue_stats_debugs = {
+	.write = wlan_hdd_write_txqueue_stats_debugfs,
+	.read = wlan_hdd_read_txqueue_stats_debugfs,
+	.open = wlan_hdd_debugfs_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+static VOS_STATUS wlan_hdd_init_txqueue_stats_debugfs(hdd_adapter_t *adapter,
+						      hdd_context_t *hdd_ctx)
+{
+	if (NULL == debugfs_create_file("txqueue_stats",
+					S_IRUSR | S_IWUSR,
+					hdd_ctx->debugfs_phy, adapter,
+					&fops_txqueue_stats_debugs))
+		return VOS_STATUS_E_FAILURE;
+
+	txqueue_stats_lock_ptr = vos_mem_malloc(sizeof(vos_lock_t));
+
+	if (NULL == txqueue_stats_lock_ptr) {
+		hddLog(VOS_TRACE_LEVEL_ERROR,
+		       FL("no mem for txqueue_stats_lock init"));
+		return VOS_STATUS_E_FAILURE;
+	}
+
+	vos_mem_set(txqueue_stats_lock_ptr, sizeof(vos_lock_t), 0);
+
+	if (!VOS_IS_STATUS_SUCCESS(vos_lock_init(txqueue_stats_lock_ptr))) {
+		vos_mem_free(txqueue_stats_lock_ptr);
+		hddLog(VOS_TRACE_LEVEL_ERROR,
+		       FL("txqueue_stats_lock init failed"));
+	}
+
+	return VOS_STATUS_SUCCESS;
+}
+
+static VOS_STATUS wlan_hdd_deinit_txqueue_stats_debugfs(void)
+{
+	vos_mem_free(txqueue_stats_lock_ptr);
+	vos_lock_destroy(txqueue_stats_lock_ptr);
+	return VOS_STATUS_SUCCESS;
+}
+#else
+static VOS_STATUS wlan_hdd_init_txqueue_stats_debugfs(hdd_adapter_t *adapter,
+						      hdd_context_t *hdd_ctx)
+{
+	return VOS_STATUS_SUCCESS;
+}
+
+static VOS_STATUS wlan_hdd_deinit_txqueue_stats_debugfs(void)
+{
+	return VOS_STATUS_SUCCESS;
+}
+#endif
 VOS_STATUS hdd_debugfs_init(hdd_adapter_t *pAdapter)
 {
     hdd_context_t *pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
-    pHddCtx->debugfs_phy = debugfs_create_dir("wlan_wcnss", 0);
+    pHddCtx->debugfs_phy = debugfs_create_dir(HDD_DEBUGFS_DIRNAME, 0);
 
     if (NULL == pHddCtx->debugfs_phy)
         return VOS_STATUS_E_FAILURE;
@@ -628,11 +1120,27 @@ VOS_STATUS hdd_debugfs_init(hdd_adapter_t *pAdapter)
         pHddCtx->debugfs_phy, pAdapter, &fops_patterngen))
         return VOS_STATUS_E_FAILURE;
 
+    if (VOS_STATUS_SUCCESS != wlan_hdd_init_power_stats_debugfs(pAdapter,
+                                                                pHddCtx))
+        return VOS_STATUS_E_FAILURE;
+
+    if (wlan_hdd_create_dsrc_tx_stats_file(pAdapter, pHddCtx))
+        return VOS_STATUS_E_FAILURE;
+
+    if (wlan_hdd_create_dsrc_chan_stats_file(pAdapter, pHddCtx))
+        return VOS_STATUS_E_FAILURE;
+
+    if (VOS_STATUS_SUCCESS !=
+	wlan_hdd_init_txqueue_stats_debugfs(pAdapter, pHddCtx))
+        return VOS_STATUS_E_FAILURE;
+
     return VOS_STATUS_SUCCESS;
 }
 
 void hdd_debugfs_exit(hdd_context_t *pHddCtx)
 {
+    wlan_hdd_deinit_power_stats_debugfs(pHddCtx);
+    wlan_hdd_deinit_txqueue_stats_debugfs();
     debugfs_remove_recursive(pHddCtx->debugfs_phy);
 }
 #endif /* #ifdef WLAN_OPEN_SOURCE */

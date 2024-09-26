@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -55,14 +55,13 @@
 #include "hif_pci.h"
 #include "vos_trace.h"
 #include "vos_api.h"
-#if  defined(CONFIG_CNSS)
-#include <net/cnss.h>
-#endif
+#include "vos_cnss.h"
 #include <vos_getBin.h>
 #include "epping_main.h"
 #ifdef CONFIG_PCI_MSM
 #include <linux/msm_pcie.h>
 #endif
+#include "adf_trace.h"
 
 /* use credit flow control over HTC */
 unsigned int htc_credit_flow = 1;
@@ -92,14 +91,11 @@ ATH_DEBUG_INSTANTIATE_MODULE_VAR(hif,
 
 
 #ifdef CONFIG_ATH_PCIE_ACCESS_DEBUG
-spinlock_t pcie_access_log_lock;
+adf_os_spinlock_t pcie_access_log_lock;
 unsigned int pcie_access_log_seqnum = 0;
 HIF_ACCESS_LOG pcie_access_log[PCIE_ACCESS_LOG_NUM];
 static void HIFTargetDumpAccessLog(void);
 #endif
-
-/* Forward references */
-static int hif_post_recv_buffers_for_pipe(struct HIF_CE_pipe_info *pipe_info);
 
 /*
  * Host software's Copy Engine configuration.
@@ -259,14 +255,14 @@ WAR_PCI_WRITE32(char *addr, u32 offset, u32 value)
     if (hif_pci_war1) {
         unsigned long irq_flags;
 
-        spin_lock_irqsave(&pciwar_lock, irq_flags);
+        adf_os_raw_spin_lock_irqsave(&pciwar_lock, irq_flags);
 
         (void)ioread32((void __iomem *)(addr+offset+4)); /* 3rd read prior to write */
         (void)ioread32((void __iomem *)(addr+offset+4)); /* 2nd read prior to write */
         (void)ioread32((void __iomem *)(addr+offset+4)); /* 1st read prior to write */
         iowrite32((u32)(value), (void __iomem *)(addr+offset));
 
-        spin_unlock_irqrestore(&pciwar_lock, irq_flags);
+        adf_os_raw_spin_unlock_irqrestore(&pciwar_lock, irq_flags);
     } else {
         iowrite32((u32)(value), (void __iomem *)(addr+offset));
     }
@@ -373,6 +369,10 @@ HIFSend_head(HIF_DEVICE *hif_device,
         return A_ERROR;
     }
 
+    NBUF_UPDATE_TX_PKT_COUNT(nbuf, NBUF_TX_PKT_HIF);
+    DPTRACE(adf_dp_trace(nbuf, ADF_DP_TRACE_HIF_PACKET_PTR_RECORD,
+                adf_nbuf_data_addr(nbuf),
+                sizeof(adf_nbuf_data(nbuf)), ADF_TX));
     status = CE_sendlist_send(ce_hdl, nbuf, &sendlist, transfer_id);
     A_ASSERT(status == A_OK);
 
@@ -464,10 +464,10 @@ HIF_PCI_CE_send_done(struct CE_handle *copyeng, void *ce_context, void *transfer
             adf_os_spin_unlock(&pipe_info->completion_freeq_lock);
             AR_DEBUG_PRINTF(ATH_DEBUG_ERR,
                             ("Out of free buf in hif send completion list, potential hw_index corruption"
-                             "pipe_num:%d num_send_allowed:%d pipe_info:0x%p sw_index:%d hw_index:%d nbytes:%d\n",
+                             "pipe_num:%d num_send_allowed:%d pipe_info:0x%pK sw_index:%d hw_index:%d nbytes:%d\n",
                             pipe_info->pipe_num, pipe_info->num_sends_allowed,
                             pipe_info, sw_idx, hw_idx, nbytes));
-            ASSERT(0);
+            ce_target_reset(hif_state->sc);
             break;
         }
         pipe_info->completion_freeq_head = compl_state->next;
@@ -538,7 +538,13 @@ HIF_PCI_CE_recv_data(struct CE_handle *copyeng, void *ce_context, void *transfer
         hif_pm_runtime_mark_last_busy(sc->dev);
         adf_os_spin_lock(&pipe_info->completion_freeq_lock);
         compl_state = pipe_info->completion_freeq_head;
-        ASSERT(compl_state != NULL);
+
+        if (!compl_state) {
+            adf_os_spin_unlock(&pipe_info->completion_freeq_lock);
+            ce_target_reset(sc);
+            break;
+        }
+
         pipe_info->completion_freeq_head = compl_state->next;
         adf_os_spin_unlock(&pipe_info->completion_freeq_lock);
 
@@ -613,7 +619,7 @@ HIFPostInit(HIF_DEVICE *hif_device, void *unused, MSG_BASED_HIF_CALLBACKS *callb
 
     AR_DEBUG_PRINTF(ATH_DEBUG_TRC, ("+%s\n",__FUNCTION__));
 #ifdef CONFIG_ATH_PCIE_ACCESS_DEBUG
-    spin_lock_init(&pcie_access_log_lock);
+    adf_os_spinlock_init(&pcie_access_log_lock);
 #endif
     /* Save callbacks for later installation */
     A_MEMCPY(&hif_state->msg_callbacks_pending, callbacks, sizeof(hif_state->msg_callbacks_pending));
@@ -657,7 +663,7 @@ hif_completion_thread_startup(struct HIF_CE_state *hif_state)
         attr = host_CE_config[pipe_num];
         completions_needed = 0;
         if (attr.src_nentries) { /* pipe used to send to target */
-            AR_DEBUG_PRINTF(ATH_DEBUG_INFO, ("pipe_num:%d pipe_info:0x%p\n",
+            AR_DEBUG_PRINTF(ATH_DEBUG_INFO, ("pipe_num:%d pipe_info:0x%pK\n",
                             pipe_num, pipe_info));
             CE_send_cb_register(pipe_info->ce_hdl, HIF_PCI_CE_send_done, pipe_info, attr.flags & CE_ATTR_DISABLE_INTR);
             completions_needed += attr.src_nentries;
@@ -857,13 +863,13 @@ hif_completion_thread(struct HIF_CE_state *hif_state)
 				To see the following debug output, enable the HIF_PCI_DEBUG flag in
 				the debug module declaration in this source file
 				*/
-				AR_DEBUG_PRINTF(HIF_PCI_DEBUG,("HIF_PCI_CE_recv_data netbuf=%p  nbytes=%d\n", netbuf, nbytes));
+				AR_DEBUG_PRINTF(HIF_PCI_DEBUG,("HIF_PCI_CE_recv_data netbuf=%pK  nbytes=%d\n", netbuf, nbytes));
                 if (nbytes <= pipe_info->buf_sz) {
                     adf_nbuf_set_pktlen(netbuf, nbytes);
                     msg_callbacks->rxCompletionHandler(msg_callbacks->Context,
                                                        netbuf, pipe_info->pipe_num);
                 } else {
-                    AR_DEBUG_PRINTF(ATH_DEBUG_ERR, ("Invalid Rx message netbuf:%p nbytes:%d\n",
+                    AR_DEBUG_PRINTF(ATH_DEBUG_ERR, ("Invalid Rx message netbuf:%pK nbytes:%d\n",
                                                     netbuf, nbytes));
                     adf_nbuf_free(netbuf);
                 }
@@ -1587,6 +1593,7 @@ hif_post_recv_buffers_for_pipe(struct HIF_CE_pipe_info *pipe_info)
                 ("%s CE_recv_buf_enqueue error [%d] needed %d\n",
                 __func__, pipe_info->pipe_num,
                 atomic_read(&pipe_info->recv_bufs_needed)));
+            adf_nbuf_unmap_single(scn->adf_dev, nbuf, ADF_OS_DMA_FROM_DEVICE);
             atomic_inc(&pipe_info->recv_bufs_needed);
             adf_nbuf_free(nbuf);
             adf_os_spin_lock_bh(&pipe_info->recv_bufs_needed_lock);
@@ -1809,8 +1816,9 @@ hif_send_buffer_cleanup_on_pipe(struct HIF_CE_pipe_info *pipe_info)
                 return;
             }
             /* Indicate the completion to higer layer to free the buffer */
-            hif_state->msg_callbacks_current.txCompletionHandler(
-                hif_state->msg_callbacks_current.Context, netbuf, id);
+            if (hif_state->msg_callbacks_current.txCompletionHandler)
+                hif_state->msg_callbacks_current.txCompletionHandler(
+                    hif_state->msg_callbacks_current.Context, netbuf, id);
         }
     }
 }
@@ -2004,6 +2012,8 @@ HIF_BMI_recv_data(struct CE_handle *copyeng, void *ce_context, void *transfer_co
 }
 #endif
 
+/* Timeout for BMI message exchange */
+#define HIF_EXCHANGE_BMI_MSG_TIMEOUT      6000
 int
 HIFExchangeBMIMsg(HIF_DEVICE *hif_device,
                   A_UINT8    *bmi_request,
@@ -2083,9 +2093,14 @@ HIFExchangeBMIMsg(HIF_DEVICE *hif_device,
     /* TBDXXX: handle timeout */
 
     /* Wait for BMI request/response transaction to complete */
-    /* Always just wait for BMI request here if BMI_RSP_POLLING is defined */
-    while (adf_os_mutex_acquire(scn->adf_dev, &transaction->bmi_transaction_sem)) {
-        /*need some break out condition(time out?)*/
+    if (adf_os_mutex_acquire_timeout(scn->adf_dev,
+                                     &transaction->bmi_transaction_sem,
+                                     HIF_EXCHANGE_BMI_MSG_TIMEOUT)) {
+        AR_DEBUG_PRINTF(ATH_DEBUG_ERR,
+                        ("%s:Fatal error, BMI transaction timeout. Please check the HW interface!!",
+                         __func__));
+        A_FREE(transaction);
+        return -ETIMEDOUT;
     }
 
     if (bmi_response) {
@@ -2344,15 +2359,22 @@ HIF_wake_target_cpu(struct hif_pci_softc *sc)
 
 #define HIF_MIN_SLEEP_INACTIVITY_TIME_MS     50
 #define HIF_SLEEP_INACTIVITY_TIMER_PERIOD_MS 60
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+static void
+HIF_sleep_entry(struct timer_list *t)
+{
+	 struct HIF_CE_state *hif_state = from_timer(hif_state, t, sleep_timer);
+#else
 static void
 HIF_sleep_entry(void *arg)
 {
 	struct HIF_CE_state *hif_state = (struct HIF_CE_state *)arg;
+#endif
 	A_target_id_t pci_addr = TARGID_TO_PCI_ADDR(hif_state->targid);
 	struct hif_pci_softc *sc = hif_state->sc;
 	u_int32_t idle_ms;
 
-	if (vos_is_unload_in_progress(VOS_MODULE_ID_HIF, NULL))
+	if (vos_is_unload_in_progress())
 		return;
 
 	if (sc->recovery)
@@ -2617,7 +2639,8 @@ HIF_PCIDeviceProbed(hif_handle_t hif_hdl)
 	          AR_DEBUG_PRINTF(ATH_DEBUG_INFO, ("ath: HIF_PCIDeviceProbed get chip id val (%d)\n", rv));
 		  goto done;
 	     }
-	     if (CHIP_ID_VERSION_GET(chip_id) == 0xD) {
+	     if (CHIP_ID_VERSION_GET(chip_id) == 0xD ||
+                 CHIP_ID_VERSION_GET(chip_id) == 0xF) {
              scn->target_revision = CHIP_ID_REVISION_GET(chip_id);
              switch(CHIP_ID_REVISION_GET(chip_id)) {
              case 0x2: /* ROME 1.3 */
@@ -2631,6 +2654,7 @@ HIF_PCIDeviceProbed(hif_handle_t hif_hdl)
              case 0x8: /* ROME 3.0 */
              case 0x9: /* ROME 3.1 */
              case 0xA: /* ROME 3.2 */
+             case 0xD: /* Naples */
                  banks_switched = 9;
                  break;
              case 0x0: /* ROME 1.0 */
@@ -2641,6 +2665,8 @@ HIF_PCIDeviceProbed(hif_handle_t hif_hdl)
                      break;
              }
 
+         } else if (CHIP_ID_VERSION_GET(chip_id) == 0xE) {
+             banks_switched = 9; /* QCA9377 shall use 9 IRAM banks */
          }
          ealloc_value |= ((banks_switched << HI_EARLY_ALLOC_IRAM_BANKS_SHIFT) & HI_EARLY_ALLOC_IRAM_BANKS_MASK);
         }
@@ -2827,6 +2853,9 @@ HIFTargetSleepStateAdjust(A_target_id_t targid,
                 if (tot_delay > PCIE_WAKE_TIMEOUT)
                 {
                     u_int16_t val;
+#ifdef CONFIG_NON_QC_PLATFORM_PCI
+		    u_int16_t devid;
+#endif
                     u_int32_t bar;
 
                     printk("%s: keep_awake_count = %d\n", __func__,
@@ -2837,6 +2866,9 @@ HIFTargetSleepStateAdjust(A_target_id_t targid,
 
                     pci_read_config_word(sc->pdev, PCI_DEVICE_ID, &val);
                     printk("%s: PCI Device ID = 0x%04x\n", __func__, val);
+#ifdef CONFIG_NON_QC_PLATFORM_PCI
+		    devid = val;
+#endif
 
                     pci_read_config_word(sc->pdev, PCI_COMMAND, &val);
                     printk("%s: PCI Command = 0x%04x\n", __func__, val);
@@ -2856,13 +2888,22 @@ HIFTargetSleepStateAdjust(A_target_id_t targid,
 
                     printk("%s:error, can't wakeup target\n", __func__);
                     hif_msm_pcie_debug_info(sc);
-                    if (!sc->ol_sc->enable_self_recovery)
-                            VOS_BUG(0);
-                    sc->recovery = true;
-                    vos_set_logp_in_progress(VOS_MODULE_ID_VOSS, TRUE);
-#ifdef CONFIG_CNSS
-                    cnss_wlan_pci_link_down();
+#ifdef CONFIG_NON_QC_PLATFORM_PCI
+		    if (sc->devid != devid)
+			return -EACCES;
 #endif
+
+                    if (!vos_is_logp_in_progress(VOS_MODULE_ID_VOSS, NULL)) {
+                        sc->recovery = true;
+                        vos_set_logp_in_progress(VOS_MODULE_ID_VOSS, TRUE);
+                        if (!sc->ol_sc->enable_self_recovery)
+                            vos_device_crashed(sc->dev);
+                        else
+                            vos_wlan_pci_link_down();
+                    } else {
+                        adf_os_print("%s- %d: SSR is in progress!!!!\n",
+                                     __func__, __LINE__);
+                    }
                     return -EACCES;
                 }
 
@@ -2945,16 +2986,15 @@ HIFTargetReadChecked(A_target_id_t targid, A_UINT32 offset)
     value = A_PCI_READ32(addr);
 
     {
-    unsigned long irq_flags;
     int idx = pcie_access_log_seqnum % PCIE_ACCESS_LOG_NUM;
 
-    spin_lock_irqsave(&pcie_access_log_lock, irq_flags);
+    adf_os_spin_lock_irqsave(&pcie_access_log_lock);
     pcie_access_log[idx].seqnum = pcie_access_log_seqnum;
     pcie_access_log[idx].is_write = FALSE;
     pcie_access_log[idx].addr = addr;
     pcie_access_log[idx].value = value;
     pcie_access_log_seqnum++;
-    spin_unlock_irqrestore(&pcie_access_log_lock, irq_flags);
+    adf_os_spin_unlock_irqrestore(&pcie_access_log_lock);
     }
 
     return value;
@@ -2973,16 +3013,15 @@ HIFTargetWriteChecked(A_target_id_t targid, A_UINT32 offset, A_UINT32 value)
     A_PCI_WRITE32(addr, value);
 
     {
-    unsigned long irq_flags;
     int idx = pcie_access_log_seqnum % PCIE_ACCESS_LOG_NUM;
 
-    spin_lock_irqsave(&pcie_access_log_lock, irq_flags);
+    adf_os_spin_lock_irqsave(&pcie_access_log_lock);
     pcie_access_log[idx].seqnum = pcie_access_log_seqnum;
     pcie_access_log[idx].is_write = TRUE;
     pcie_access_log[idx].addr = addr;
     pcie_access_log[idx].value = value;
     pcie_access_log_seqnum++;
-    spin_unlock_irqrestore(&pcie_access_log_lock, irq_flags);
+    adf_os_spin_unlock_irqrestore(&pcie_access_log_lock);
     }
 }
 
@@ -2997,9 +3036,8 @@ void
 HIFTargetDumpAccessLog(void)
 {
     int idx, len, start_idx, cur_idx;
-    unsigned long irq_flags;
 
-    spin_lock_irqsave(&pcie_access_log_lock, irq_flags);
+    adf_os_spin_lock_irqsave(&pcie_access_log_lock);
     if (pcie_access_log_seqnum > PCIE_ACCESS_LOG_NUM)
     {
         len = PCIE_ACCESS_LOG_NUM;
@@ -3014,7 +3052,7 @@ HIFTargetDumpAccessLog(void)
     for(idx = 0; idx < len; idx++)
     {
         cur_idx = (start_idx + idx) % PCIE_ACCESS_LOG_NUM;
-        printk("idx:%d\t sn:%u wr:%d addr:%p val:%u.\n",
+        printk("idx:%d\t sn:%u wr:%d addr:%pK val:%u.\n",
                idx,
                pcie_access_log[cur_idx].seqnum,
                pcie_access_log[cur_idx].is_write,
@@ -3023,7 +3061,7 @@ HIFTargetDumpAccessLog(void)
     }
 
     pcie_access_log_seqnum = 0;
-    spin_unlock_irqrestore(&pcie_access_log_lock, irq_flags);
+    adf_os_spin_unlock_irqrestore(&pcie_access_log_lock);
 }
 #endif
 
@@ -3218,7 +3256,6 @@ int hif_pm_runtime_put(HIF_DEVICE *hif_device)
 	struct hif_pci_softc *sc = hif_state->sc;
 	int ret = 0;
 	int pm_state, usage_count;
-	unsigned long flags;
 
 	pm_state = adf_os_atomic_read(&sc->pm_state);
 	usage_count = atomic_read(&sc->dev->power.usage_count);
@@ -3233,9 +3270,7 @@ int hif_pm_runtime_put(HIF_DEVICE *hif_device)
 
 	if ((pm_state == HIF_PM_RUNTIME_STATE_NONE && usage_count == 1) ||
 					usage_count == 0) {
-		spin_lock_irqsave(&sc->runtime_lock, flags);
 		hif_pci_runtime_pm_warn(sc, "PUT Without a Get Operation");
-		spin_unlock_irqrestore(&sc->runtime_lock, flags);
 		return -EINVAL;
 	}
 
@@ -3345,11 +3380,10 @@ static int __hif_pm_runtime_allow_suspend(struct hif_pci_softc *hif_sc,
 void hif_pci_runtime_pm_timeout_fn(unsigned long data)
 {
 	struct hif_pci_softc *hif_sc = (struct hif_pci_softc *)data;
-	unsigned long flags;
 	unsigned long timer_expires;
 	struct hif_pm_runtime_context *context, *temp;
 
-	spin_lock_irqsave(&hif_sc->runtime_lock, flags);
+	adf_os_spin_lock_bh(&hif_sc->runtime_lock);
 
 	timer_expires = hif_sc->runtime_timer_expires;
 
@@ -3377,7 +3411,7 @@ void hif_pci_runtime_pm_timeout_fn(unsigned long data)
 		}
 	}
 
-	spin_unlock_irqrestore(&hif_sc->runtime_lock, flags);
+	adf_os_spin_unlock_bh(&hif_sc->runtime_lock);
 }
 
 int hif_pm_runtime_prevent_suspend(void *ol_sc, void *data)
@@ -3385,7 +3419,6 @@ int hif_pm_runtime_prevent_suspend(void *ol_sc, void *data)
 	struct ol_softc *sc = (struct ol_softc *)ol_sc;
 	struct hif_pci_softc *hif_sc = sc->hif_sc;
 	struct hif_pm_runtime_context *context = data;
-	unsigned long flags;
 
 	if (!sc->enable_runtime_pm)
 		return 0;
@@ -3393,10 +3426,13 @@ int hif_pm_runtime_prevent_suspend(void *ol_sc, void *data)
 	if (!context)
 		return -EINVAL;
 
-	spin_lock_irqsave(&hif_sc->runtime_lock, flags);
+	if (in_irq())
+		WARN_ON(1);
+
+	adf_os_spin_lock_bh(&hif_sc->runtime_lock);
 	context->timeout = 0;
 	__hif_pm_runtime_prevent_suspend(hif_sc, context);
-	spin_unlock_irqrestore(&hif_sc->runtime_lock, flags);
+	adf_os_spin_unlock_bh(&hif_sc->runtime_lock);
 
 	return 0;
 }
@@ -3407,15 +3443,16 @@ int hif_pm_runtime_allow_suspend(void *ol_sc, void *data)
 	struct hif_pci_softc *hif_sc = sc->hif_sc;
 	struct hif_pm_runtime_context *context = data;
 
-	unsigned long flags;
-
 	if (!sc->enable_runtime_pm)
 		return 0;
 
 	if (!context)
 		return -EINVAL;
 
-	spin_lock_irqsave(&hif_sc->runtime_lock, flags);
+	if (in_irq())
+		WARN_ON(1);
+
+	adf_os_spin_lock_bh(&hif_sc->runtime_lock);
 
 	__hif_pm_runtime_allow_suspend(hif_sc, context);
 
@@ -3431,7 +3468,7 @@ int hif_pm_runtime_allow_suspend(void *ol_sc, void *data)
 		hif_sc->runtime_timer_expires = 0;
 	}
 
-	spin_unlock_irqrestore(&hif_sc->runtime_lock, flags);
+	adf_os_spin_unlock_bh(&hif_sc->runtime_lock);
 
 	return 0;
 }
@@ -3458,7 +3495,6 @@ int hif_pm_runtime_prevent_suspend_timeout(void *ol_sc, void *data,
 	struct hif_pci_softc *hif_sc = sc->hif_sc;
 	int ret = 0;
 	unsigned long expires;
-	unsigned long flags;
 	struct hif_pm_runtime_context *context = data;
 
 	if (vos_is_load_unload_in_progress(VOS_MODULE_ID_HIF, NULL)) {
@@ -3480,6 +3516,9 @@ int hif_pm_runtime_prevent_suspend_timeout(void *ol_sc, void *data,
 	if (!context)
 		return -EINVAL;
 
+	if (in_irq())
+		WARN_ON(1);
+
 	/*
 	 * Don't use internal timer if the timeout is less than auto suspend
 	 * delay.
@@ -3493,7 +3532,7 @@ int hif_pm_runtime_prevent_suspend_timeout(void *ol_sc, void *data,
 	expires = jiffies + msecs_to_jiffies(delay);
 	expires += !expires;
 
-	spin_lock_irqsave(&hif_sc->runtime_lock, flags);
+	adf_os_spin_lock_bh(&hif_sc->runtime_lock);
 
 	context->timeout = delay;
 	ret = __hif_pm_runtime_prevent_suspend(hif_sc, context);
@@ -3507,7 +3546,7 @@ int hif_pm_runtime_prevent_suspend_timeout(void *ol_sc, void *data,
 		hif_sc->runtime_timer_expires = expires;
 	}
 
-	spin_unlock_irqrestore(&hif_sc->runtime_lock, flags);
+	adf_os_spin_unlock_bh(&hif_sc->runtime_lock);
 
 	VOS_TRACE(VOS_MODULE_ID_HIF, VOS_TRACE_LEVEL_INFO,
 		  "%s: pm_state: %d delay: %dms ret: %d\n", __func__,
@@ -3550,7 +3589,6 @@ void *hif_runtime_pm_prevent_suspend_init(const char *name)
  */
 void hif_runtime_pm_prevent_suspend_deinit(void *data)
 {
-	unsigned long flags;
 	struct hif_pm_runtime_context *context = data;
 	void *vos_context = vos_get_global_context(VOS_MODULE_ID_HIF, NULL);
 	struct ol_softc *scn =  vos_get_context(VOS_MODULE_ID_HIF,
@@ -3572,13 +3610,61 @@ void hif_runtime_pm_prevent_suspend_deinit(void *data)
 	 * Ensure to delete the context list entry and reduce the usage count
 	 * before freeing the context if context is active.
 	 */
-	spin_lock_irqsave(&sc->runtime_lock, flags);
+	adf_os_spin_lock_bh(&sc->runtime_lock);
 	__hif_pm_runtime_allow_suspend(sc, context);
-	spin_unlock_irqrestore(&sc->runtime_lock, flags);
+	adf_os_spin_unlock_bh(&sc->runtime_lock);
 
 	adf_os_mem_free(context);
 }
+
+/**
+ * hif_pm_ssr_runtime_allow_suspend() - Release Runtime Context during SSR
+ * @sc: hif_pci context
+ * @context: runtime context
+ *
+ * API is used to release runtime pm context from prevent suspend list and
+ * reduce the usage count taken by the context and set the context state to
+ * false.
+ *
+ * Return: void
+ */
+void hif_pm_ssr_runtime_allow_suspend(struct hif_pci_softc *sc, void *context)
+{
+	__hif_pm_runtime_allow_suspend(sc, context);
+}
+
+/**
+ * hif_request_runtime_pm_resume() - API to do runtime resume
+ * @ol_sc: HIF context
+ *
+ * API to request runtime resume
+ *
+ * Return: void
+ */
+void hif_request_runtime_pm_resume(void *ol_sc)
+{
+	struct ol_softc *sc = (struct ol_softc *)ol_sc;
+	struct hif_pci_softc *hif_sc = sc->hif_sc;
+	struct device *dev = hif_sc->dev;
+
+	hif_pm_request_resume(dev);
+	hif_pm_runtime_mark_last_busy(dev);
+}
 #endif
+
+/**
+ * hif_is_80211_fw_wow_required() - API to check if target suspend is needed
+ *
+ * API determines if fw can be suspended and returns true/false to the caller.
+ * Caller will call WMA WoW API's to suspend.
+ * This API returns true only for SDIO bus types, for others it's a false.
+ *
+ * Return: bool
+ */
+bool hif_is_80211_fw_wow_required(void)
+{
+	return false;
+}
 
 /* hif_addr_in_boundary() - API to check if addr is with in PCIE BAR range
  * @hif_device:  context of cd

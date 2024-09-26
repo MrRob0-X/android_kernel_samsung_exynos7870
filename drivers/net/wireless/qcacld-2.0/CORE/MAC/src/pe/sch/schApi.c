@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, 2016-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -346,7 +346,8 @@ tSirRetStatus schSendBeaconReq( tpAniSirGlobal pMac, tANI_U8 *beaconPayload, tAN
         FL("Successfully posted WDA_SEND_BEACON_REQ to HAL"));
 
     if (LIM_IS_AP_ROLE(psessionEntry) &&
-        pMac->sch.schObject.fBeaconChanged) {
+        pMac->sch.schObject.fBeaconChanged &&
+        vos_is_probe_rsp_offload_enabled()) {
         if(eSIR_SUCCESS != (retCode = limSendProbeRspTemplateToHal(pMac,psessionEntry,
                                     &psessionEntry->DefProbeRspIeBitmap[0])))
         {
@@ -420,7 +421,7 @@ tANI_U32 limSendProbeRspTemplateToHal(tpAniSirGlobal pMac,tpPESession psessionEn
     tANI_U32             addnIELenWoP2pIe = 0;
     tANI_U32             retStatus;
     tDot11fIEExtCap extracted_extcap;
-    bool extcap_present = true;
+    bool extcap_present = false;
     tDot11fProbeResponse *prb_rsp_frm;
     tSirRetStatus status;
     uint16_t addn_ielen = 0;
@@ -478,8 +479,9 @@ tANI_U32 limSendProbeRspTemplateToHal(tpAniSirGlobal pMac,tpPESession psessionEn
         status = lim_strip_extcap_update_struct(pMac, addIE, &addn_ielen,
                                                    &extracted_extcap);
         if (eSIR_SUCCESS != status) {
-            extcap_present = false;
             limLog(pMac, LOG1, FL("extcap not extracted"));
+        } else {
+            extcap_present = true;
         }
 
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014, 2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014, 2016-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -120,7 +120,7 @@ moduleTraceInfo gVosTraceInfo[ VOS_MODULE_ID_MAX ] =
 /*-------------------------------------------------------------------------
   Static and Global variables
   ------------------------------------------------------------------------*/
-static spinlock_t ltraceLock;
+static adf_os_spinlock_t ltraceLock;
 
 static tvosTraceRecord gvosTraceTbl[MAX_VOS_TRACE_RECORDS];
 // Global vosTraceData
@@ -293,7 +293,7 @@ void vos_trace_msg( VOS_MODULE_ID module, VOS_TRACE_LEVEL level, char *strFormat
       va_start(val, strFormat);
 
       // print the prefix string into the string buffer...
-      n = snprintf(strBuffer, VOS_TRACE_BUFFER_SIZE, "wlan: [%d:%2s:%3s] ",
+      n = snprintf(strBuffer, VOS_TRACE_BUFFER_SIZE, "wlan" IFNAME_SUFFIX ": [%d:%2s:%3s] ",
                    in_interrupt() ? 0 : current->pid,
                    (char *) TRACE_LEVEL_STR[ level ],
                    (char *) gVosTraceInfo[ module ].moduleNameStr );
@@ -358,43 +358,25 @@ void vos_trace_display(void)
   \sa
   --------------------------------------------------------------------------*/
 void vos_trace_hex_dump( VOS_MODULE_ID module, VOS_TRACE_LEVEL level,
-                                void *data, int buf_len )
+		void *data, int buf_len )
 {
-    char *buf = (char *)data;
-    int i;
+	const u8 *ptr = data;
+	int i, linelen, remaining = buf_len;
+	unsigned char linebuf[BUFFER_SIZE];
 
-    if (!(gVosTraceInfo[module].moduleTraceLevel &
-                VOS_TRACE_LEVEL_TO_MODULE_BITMASK(level)))
-        return;
+	if (!(gVosTraceInfo[module].moduleTraceLevel &
+				VOS_TRACE_LEVEL_TO_MODULE_BITMASK(level)))
+		return;
 
-    for (i=0; (i+15)< buf_len; i+=16)
-    {
-        vos_trace_msg( module, level,
-                 "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-                 buf[i],
-                 buf[i+1],
-                 buf[i+2],
-                 buf[i+3],
-                 buf[i+4],
-                 buf[i+5],
-                 buf[i+6],
-                 buf[i+7],
-                 buf[i+8],
-                 buf[i+9],
-                 buf[i+10],
-                 buf[i+11],
-                 buf[i+12],
-                 buf[i+13],
-                 buf[i+14],
-                 buf[i+15]);
-    }
+	for (i = 0; i < buf_len; i += ROW_SIZE) {
+		linelen = min(remaining, ROW_SIZE);
+		remaining -= ROW_SIZE;
 
-    // Dump the bytes in the last line
-    for (; i < buf_len; i++)
-    {
-        vos_trace_msg( module, level, "%02x ", buf[i]);
-    }
+		hex_dump_to_buffer(ptr + i, linelen, ROW_SIZE, 1,
+				linebuf, sizeof(linebuf), false);
 
+		vos_trace_msg(module, level, "%.8x: %s", i, linebuf);
+	}
 }
 
 #endif
@@ -516,7 +498,7 @@ void vos_register_debugcb_init(void)
 void vos_trace(v_U8_t module, v_U8_t code, v_U16_t session, v_U32_t data)
 {
     tpvosTraceRecord rec = NULL;
-    unsigned long flags;
+    char time[20];
 
     if (!gvosTraceData.enable)
     {
@@ -528,8 +510,10 @@ void vos_trace(v_U8_t module, v_U8_t code, v_U16_t session, v_U32_t data)
          return;
     }
 
+    vos_get_time_of_the_day_in_hr_min_sec_usec(time, sizeof(time));
+
     /* Aquire the lock so that only one thread at a time can fill the ring buffer */
-    spin_lock_irqsave(&ltraceLock, flags);
+    adf_os_spin_lock_irqsave(&ltraceLock);
 
     gvosTraceData.num++;
 
@@ -565,16 +549,15 @@ void vos_trace(v_U8_t module, v_U8_t code, v_U16_t session, v_U32_t data)
 
         gvosTraceData.tail = tail;
     }
-
     rec = &gvosTraceTbl[gvosTraceData.tail];
     rec->code = code;
     rec->session = session;
     rec->data = data;
-    rec->time = adf_get_boottime();
-    rec->module =  module;
+    snprintf(rec->time, sizeof(rec->time), "%s", time);
+    rec->module = module;
     rec->pid = (in_interrupt() ? 0 : current->pid);
     gvosTraceData.numSinceLastDump ++;
-    spin_unlock_irqrestore(&ltraceLock, flags);
+    adf_os_spin_unlock_irqrestore(&ltraceLock);
 }
 
 
@@ -586,7 +569,7 @@ void vos_trace(v_U8_t module, v_U8_t code, v_U16_t session, v_U32_t data)
   ----------------------------------------------------------------------------*/
 VOS_STATUS vos_trace_spin_lock_init(void)
 {
-    spin_lock_init(&ltraceLock);
+    adf_os_spinlock_init(&ltraceLock);
 
     return VOS_STATUS_SUCCESS;
 }
@@ -639,12 +622,12 @@ void vosTraceDumpAll(void *pMac, v_U8_t code, v_U8_t session,
         return;
     }
 
-    VOS_TRACE( VOS_MODULE_ID_SYS, VOS_TRACE_LEVEL_ERROR,
+    VOS_TRACE( VOS_MODULE_ID_SYS, VOS_TRACE_LEVEL_INFO,
                "Total Records: %d, Head: %d, Tail: %d",
                gvosTraceData.num, gvosTraceData.head, gvosTraceData.tail);
 
     /* Aquire the lock so that only one thread at a time can read the ring buffer */
-    spin_lock(&ltraceLock);
+    adf_os_spin_lock(&ltraceLock);
 
     if (gvosTraceData.head != INVALID_VOS_TRACE_ADDR)
     {
@@ -672,7 +655,7 @@ void vosTraceDumpAll(void *pMac, v_U8_t code, v_U8_t session,
            we might re-visit and use this member to track how many latest
            messages got added while we were dumping from ring buffer */
         gvosTraceData.numSinceLastDump = 0;
-        spin_unlock(&ltraceLock);
+        adf_os_spin_unlock(&ltraceLock);
         for (;;)
         {
             if ((code == 0 || (code == pRecord.code)) &&
@@ -697,7 +680,7 @@ void vosTraceDumpAll(void *pMac, v_U8_t code, v_U8_t session,
             }
             i += 1;
 
-            spin_lock(&ltraceLock);
+            adf_os_spin_lock(&ltraceLock);
             if (MAX_VOS_TRACE_RECORDS == i)
             {
                 i = 0;
@@ -707,12 +690,12 @@ void vosTraceDumpAll(void *pMac, v_U8_t code, v_U8_t session,
             {
                 pRecord = gvosTraceTbl[i];
             }
-            spin_unlock(&ltraceLock);
+            adf_os_spin_unlock(&ltraceLock);
         }
     }
     else
     {
-        spin_unlock(&ltraceLock);
+        adf_os_spin_unlock(&ltraceLock);
     }
 }
 

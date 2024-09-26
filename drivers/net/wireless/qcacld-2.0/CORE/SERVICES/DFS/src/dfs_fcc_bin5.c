@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2013 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2002-2013, 2017, 2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -183,12 +183,12 @@ int
 dfs_bin5_check(struct ath_dfs *dfs)
 {
    struct dfs_bin5radars *br;
-   int index[DFS_MAX_B5_SIZE];
+        int index[DFS_MAX_B5_SIZE];
    u_int32_t n = 0, i = 0, i1 = 0, this = 0, prev = 0, rssi_diff = 0, width_diff = 0, bursts= 0;
+        u_int32_t numevents=0;
 #ifdef WLAN_DEBUG
-   u_int32_t total_diff=0, average_diff=0, total_width=0, average_width=0;
+	u_int32_t average_diff=0, total_width=0, average_width=0, total_diff=0;
 #endif
-   u_int32_t numevents=0;
    u_int64_t pri;
 
 
@@ -362,7 +362,7 @@ dfs_check_chirping_sowl(struct ath_dfs *dfs, void *buf,
     /* DEBUG - Print relevant portions of the FFT data*/
     for (p=0; p < num_fft_packets; p++) {
 
-        DFS_DPRINTK(dfs, ATH_DEBUG_DFS_BIN5_FFT, "fft_data_ptr=0x%p\t", fft_data_ptr);
+        DFS_DPRINTK(dfs, ATH_DEBUG_DFS_BIN5_FFT, "fft_data_ptr=0x%pK\t", fft_data_ptr);
         DFS_DPRINTK(dfs, ATH_DEBUG_DFS_BIN5_FFT,
           "[66]=%d [69]=%d\n",
           *(fft_data_ptr+FFT_LOWER_BIN_MAX_INDEX_BYTE) >> 2,

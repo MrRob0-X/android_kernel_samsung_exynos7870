@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -71,6 +71,7 @@
 #include "wlan_nv.h"
 #include "wlan_qct_wda.h"
 #include "cfgApi.h"
+#include <adf_os_lock.h>
 
 #if  defined(QCA_WIFI_FTM)
 #include "bmi.h"
@@ -346,7 +347,7 @@ static VOS_STATUS wlan_ftm_vos_open( v_CONTEXT_t pVosContext, v_SIZE_t hddContex
    macOpenParms.powersaveOffloadEnabled =
       pHddCtx->cfg_ini->enablePowersaveOffload;
    vStatus = WDA_open(gpVosContext, gpVosContext->pHDDContext,
-                      wlan_hdd_ftm_update_tgt_cfg, NULL,
+                      wlan_hdd_ftm_update_tgt_cfg, NULL, NULL,
                       &macOpenParms);
    if (!VOS_IS_STATUS_SUCCESS(vStatus))
    {
@@ -741,8 +742,10 @@ err_vos_status_failure:
 static int hdd_ftm_service_registration(hdd_context_t *pHddCtx)
 {
     hdd_adapter_t *pAdapter;
-    pAdapter = hdd_open_adapter( pHddCtx, WLAN_HDD_FTM, "wlan%d",
-                wlan_hdd_get_intf_addr(pHddCtx), FALSE);
+    pAdapter = hdd_open_adapter(pHddCtx, WLAN_HDD_FTM, "wlan%d",
+                                wlan_hdd_get_intf_addr(pHddCtx),
+                                NET_NAME_UNKNOWN,
+                                FALSE);
     if( NULL == pAdapter )
     {
        hddLog(VOS_TRACE_LEVEL_ERROR,"%s: hdd_open_adapter failed", __func__);
@@ -832,7 +835,7 @@ int wlan_hdd_ftm_close(hdd_context_t *pHddCtx)
     }
 
 #if defined(QCA_WIFI_FTM) && defined(LINUX_QCMBR)
-    spin_lock_bh(&qcmbr_queue_lock);
+    adf_os_raw_spin_lock_bh(&qcmbr_queue_lock);
     if (!list_empty(&qcmbr_queue_head)) {
         qcmbr_queue_t *msg_buf, *tmp_buf;
         list_for_each_entry_safe(msg_buf, tmp_buf, &qcmbr_queue_head, list) {
@@ -840,7 +843,7 @@ int wlan_hdd_ftm_close(hdd_context_t *pHddCtx)
             kfree(msg_buf);
         }
     }
-    spin_unlock_bh(&qcmbr_queue_lock);
+    adf_os_raw_spin_unlock_bh(&qcmbr_queue_lock);
 #endif
 
     return 0;
@@ -930,7 +933,7 @@ err_status_failure:
 }
 
 #if  defined(QCA_WIFI_FTM)
-int hdd_ftm_start(hdd_context_t *pHddCtx)
+VOS_STATUS hdd_ftm_start(hdd_context_t *pHddCtx)
 {
     return wlan_hdd_ftm_start(pHddCtx);
 }
@@ -953,7 +956,8 @@ static int wlan_hdd_qcmbr_command(hdd_adapter_t *pAdapter, qcmbr_data_t *pqcmbr_
     switch (pqcmbr_data->cmd) {
         case ATH_XIOCTL_UNIFIED_UTF_CMD: {
             pqcmbr_data->copy_to_user = 0;
-            if (pqcmbr_data->length) {
+            if (pqcmbr_data->length &&
+                pqcmbr_data->length <= sizeof(pqcmbr_data->buf)) {
                 if (wlan_hdd_ftm_testmode_cmd(pqcmbr_data->buf,
                                               pqcmbr_data->length,
                                               TRUE)
@@ -968,16 +972,17 @@ static int wlan_hdd_qcmbr_command(hdd_adapter_t *pAdapter, qcmbr_data_t *pqcmbr_
 
         case ATH_XIOCTL_UNIFIED_UTF_RSP: {
             pqcmbr_data->copy_to_user = 1;
+
+            adf_os_raw_spin_lock_bh(&qcmbr_queue_lock);
             if (!list_empty(&qcmbr_queue_head)) {
-                spin_lock_bh(&qcmbr_queue_lock);
                 qcmbr_buf = list_first_entry(&qcmbr_queue_head,
                                              qcmbr_queue_t, list);
                 list_del(&qcmbr_buf->list);
-                spin_unlock_bh(&qcmbr_queue_lock);
                 ret = 0;
             } else {
                 ret = -1;
             }
+            adf_os_raw_spin_unlock_bh(&qcmbr_queue_lock);
 
             if (!ret) {
                 memcpy(pqcmbr_data->buf, qcmbr_buf->utf_buf,
@@ -1010,7 +1015,7 @@ static int wlan_hdd_qcmbr_compat_ioctl(hdd_adapter_t *pAdapter,
     }
 
     ret = wlan_hdd_qcmbr_command(pAdapter, qcmbr_data);
-    if (qcmbr_data->copy_to_user) {
+    if ((ret == 0) && qcmbr_data->copy_to_user) {
         ret = copy_to_user(ifr->ifr_data, qcmbr_data->buf,
                            (MAX_UTF_LENGTH + 4));
     }
@@ -1042,7 +1047,7 @@ static int wlan_hdd_qcmbr_ioctl(hdd_adapter_t *pAdapter, struct ifreq *ifr)
     }
 
     ret = wlan_hdd_qcmbr_command(pAdapter, qcmbr_data);
-    if (qcmbr_data->copy_to_user) {
+    if ((ret == 0) && qcmbr_data->copy_to_user) {
         ret = copy_to_user(ifr->ifr_data, qcmbr_data->buf,
                            (MAX_UTF_LENGTH + 4));
     }
@@ -1056,7 +1061,11 @@ int wlan_hdd_qcmbr_unified_ioctl(hdd_adapter_t *pAdapter, struct ifreq *ifr)
 {
     int ret = 0;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)) && defined(CONFIG_X86_64)
+    if (in_compat_syscall()) {
+#else
     if (is_compat_task()) {
+#endif
         ret = wlan_hdd_qcmbr_compat_ioctl(pAdapter, ifr);
     } else {
         ret = wlan_hdd_qcmbr_ioctl(pAdapter, ifr);
@@ -1077,9 +1086,9 @@ static void WLANQCMBR_McProcessMsg(v_VOID_t *message)
     qcmbr_buf = kzalloc(sizeof(qcmbr_queue_t), GFP_KERNEL);
     if (qcmbr_buf != NULL) {
         memcpy(qcmbr_buf->utf_buf, message, data_len);
-        spin_lock_bh(&qcmbr_queue_lock);
+        adf_os_raw_spin_lock_bh(&qcmbr_queue_lock);
         list_add_tail(&(qcmbr_buf->list), &qcmbr_queue_head);
-        spin_unlock_bh(&qcmbr_queue_lock);
+        adf_os_raw_spin_unlock_bh(&qcmbr_queue_lock);
     }
 }
 #endif /*LINUX_QCMBR*/

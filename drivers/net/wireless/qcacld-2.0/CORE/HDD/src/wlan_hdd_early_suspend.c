@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -46,16 +46,12 @@
 #include <linux/cpu.h>
 #include <wlan_hdd_includes.h>
 #include <wlan_qct_driver.h>
-#if defined(WLAN_OPEN_SOURCE) && defined(CONFIG_WAKELOCK)
-#include <linux/wakelock.h>
-#endif
 #include "halTypes.h"
 #include "sme_Api.h"
 #include <vos_api.h>
 #include <vos_sched.h>
 #include <macInitApi.h>
 #include <wlan_qct_sys.h>
-#include <wlan_btc_svc.h>
 #include <wlan_nlink_common.h>
 #include <wlan_hdd_main.h>
 #include <wlan_hdd_assoc.h>
@@ -76,6 +72,8 @@
 #ifdef IPA_OFFLOAD
 #include <wlan_hdd_ipa.h>
 #endif
+#include <wlan_logging_sock_svc.h>
+#include <wlan_hdd_p2p.h>
 
 /**-----------------------------------------------------------------------------
 *   Preprocessor definitions and constants
@@ -101,24 +99,53 @@
 #endif
 
 #include "ol_fw.h"
-/* Time in msec */
+#include "wlan_hdd_host_offload.h"
+
+/* Time in msec.
+ * Time includes 60sec timeout of request_firmware for various binaries
+ * (OTP, BDWLAN, QWLAN) and other cleanup and re-init sequence
+ */
 #ifdef CONFIG_SLUB_DEBUG_ON
-#define HDD_SSR_BRING_UP_TIME 40000
+#define HDD_SSR_BRING_UP_TIME 250000
 #else
-#define HDD_SSR_BRING_UP_TIME 30000
+#define HDD_SSR_BRING_UP_TIME 240000
 #endif
 
 static eHalStatus g_full_pwr_status;
 static eHalStatus g_standby_status;
 
 extern VOS_STATUS hdd_post_voss_start_config(hdd_context_t* pHddCtx);
-extern void hdd_wlan_initial_scan(hdd_context_t *pHddCtx);
+extern void hdd_wlan_initial_scan(hdd_adapter_t *pAdapter);
 
 extern struct notifier_block hdd_netdev_notifier;
 extern tVOS_CON_MODE hdd_get_conparam ( void );
 
 static struct timer_list ssr_timer;
 static bool ssr_timer_started;
+
+#ifdef FEATURE_WLAN_DIAG_SUPPORT
+/**
+ * hdd_wlan_offload_event()- send offloads event
+ * @type: offload type
+ * @state: enabled or disabled
+ *
+ * This Function send offloads enable/disable diag event
+ *
+ * Return: void.
+ */
+
+void hdd_wlan_offload_event(uint8_t type, uint8_t state)
+{
+	WLAN_VOS_DIAG_EVENT_DEF(host_offload, struct vos_event_offload_req);
+	vos_mem_zero(&host_offload, sizeof(host_offload));
+
+	host_offload.offload_type = type;
+	host_offload.state = state;
+
+	WLAN_VOS_DIAG_EVENT_REPORT(&host_offload, EVENT_WLAN_OFFLOAD_REQ);
+}
+
+#endif
 
 //Callback invoked by PMC to report status of standby request
 void hdd_suspend_standby_cbk (void *callbackContext, eHalStatus status)
@@ -322,8 +349,8 @@ VOS_STATUS hdd_enter_deep_sleep(hdd_context_t *pHddCtx, hdd_adapter_t *pAdapter)
 
    //Stop the Interface TX queue.
    hddLog(LOG1, FL("Disabling queues"));
-   netif_tx_disable(pAdapter->dev);
-   netif_carrier_off(pAdapter->dev);
+   wlan_hdd_netif_queue_control(pAdapter, WLAN_NETIF_TX_DISABLE_N_CARRIER,
+        WLAN_CONTROL_PATH);
 
    //Disable IMPS,BMPS as we do not want the device to enter any power
    //save mode on it own during suspend sequence
@@ -458,7 +485,7 @@ VOS_STATUS hdd_exit_deep_sleep(hdd_context_t *pHddCtx, hdd_adapter_t *pAdapter)
    pHddCtx->hdd_ps_state = eHDD_SUSPEND_NONE;
 
    //Trigger the initial scan
-   hdd_wlan_initial_scan(pHddCtx);
+   hdd_wlan_initial_scan(pAdapter);
 
    return VOS_STATUS_SUCCESS;
 
@@ -562,10 +589,8 @@ static int __wlan_hdd_ipv6_changed(struct notifier_block *nb,
 
 	hdd_ctx = container_of(nb, hdd_context_t, ipv6_notifier);
 	status = wlan_hdd_validate_context(hdd_ctx);
-	if (0 != status) {
-		hddLog(LOGE, FL("HDD context is invalid"));
+	if (0 != status)
 		return NOTIFY_DONE;
-	}
 
 	adapter = WLAN_HDD_GET_PRIV_PTR(ndev);
 	if (WLAN_HDD_ADAPTER_MAGIC != adapter->magic) return NOTIFY_DONE;
@@ -573,9 +598,18 @@ static int __wlan_hdd_ipv6_changed(struct notifier_block *nb,
 	if (WLAN_HDD_GET_CTX(adapter) != hdd_ctx) return NOTIFY_DONE;
 
 	if (adapter->device_mode == WLAN_HDD_INFRA_STATION ||
-		(adapter->device_mode == WLAN_HDD_P2P_CLIENT)) {
+	    adapter->device_mode == WLAN_HDD_P2P_CLIENT ||
+	    adapter->device_mode == WLAN_HDD_NDI) {
+
+		if (eConnectionState_Associated ==
+			WLAN_HDD_GET_STATION_CTX_PTR
+			(adapter)->conn_info.connState)
+				sme_dhcp_done_ind(hdd_ctx->hHal,
+				adapter->sessionId);
+
 		if (hdd_ctx->cfg_ini->nEnableSuspend ==
-			WLAN_MAP_SUSPEND_TO_MCAST_BCAST_FILTER)
+			WLAN_MAP_SUSPEND_TO_MCAST_BCAST_FILTER &&
+			hdd_ctx->ns_offload_enable)
 			schedule_work(&adapter->ipv6NotifierWorkQueue);
 		else
 			hddLog(LOG1, FL("Not scheduling ipv6 wq nEnableSuspend: %d"),
@@ -609,6 +643,103 @@ int wlan_hdd_ipv6_changed(struct notifier_block *nb,
 	return ret;
 }
 
+/**
+ * hdd_fill_ipv6_uc_addr() - fill IPv6 unicast addresses
+ * @idev: pointer to net device
+ * @ipv6addr: destination array to fill IPv6 addresses
+ * @ipv6addr_type: IPv6 Address type
+ * @count: number of IPv6 addresses
+ *
+ * This is the IPv6 utility function to populate unicast addresses.
+ *
+ * Return: 0 on success, error number otherwise.
+ */
+static int hdd_fill_ipv6_uc_addr(struct inet6_dev *idev,
+				uint8_t ipv6_uc_addr[][SIR_MAC_IPV6_ADDR_LEN],
+				uint8_t *ipv6addr_type, uint32_t *count)
+{
+	struct inet6_ifaddr *ifa;
+	struct list_head *p;
+	uint32_t scope;
+
+	read_lock_bh(&idev->lock);
+	list_for_each(p, &idev->addr_list) {
+		if (*count >= SIR_MAC_NUM_TARGET_IPV6_NS_OFFLOAD_NA) {
+			read_unlock_bh(&idev->lock);
+			return -EINVAL;
+		}
+		ifa = list_entry(p, struct inet6_ifaddr, if_list);
+		if (ifa->flags & IFA_F_DADFAILED)
+			continue;
+		scope = ipv6_addr_src_scope(&ifa->addr);
+		switch (scope) {
+		case IPV6_ADDR_SCOPE_GLOBAL:
+		case IPV6_ADDR_SCOPE_LINKLOCAL:
+			vos_mem_copy(ipv6_uc_addr[*count], &ifa->addr.s6_addr,
+				sizeof(ifa->addr.s6_addr));
+			ipv6addr_type[*count] = SIR_IPV6_ADDR_UC_TYPE;
+			hddLog (LOG1,
+				FL("Index %d scope = %s UC-Address: %pI6"),
+				*count, (scope == IPV6_ADDR_SCOPE_LINKLOCAL) ?
+				"LINK LOCAL": "GLOBAL", ipv6_uc_addr[*count]);
+			*count += 1;
+			break;
+		default:
+			hddLog(LOGE, "The Scope %d is not supported", scope);
+		}
+	}
+
+	read_unlock_bh(&idev->lock);
+	return 0;
+}
+
+/**
+ * hdd_fill_ipv6_ac_addr() - fill IPv6 anycast addresses
+ * @idev: pointer to net device
+ * @ipv6addr: destination array to fill IPv6 addresses
+ * @ipv6addr_type: IPv6 Address type
+ * @count: number of IPv6 addresses
+ *
+ * This is the IPv6 utility function to populate anycast addresses.
+ *
+ * Return: 0 on success, error number otherwise.
+ */
+static int hdd_fill_ipv6_ac_addr(struct inet6_dev *idev,
+				uint8_t ipv6_ac_addr[][SIR_MAC_IPV6_ADDR_LEN],
+				uint8_t *ipv6addr_type, uint32_t *count)
+{
+	struct ifacaddr6 *ifaca;
+	uint32_t scope;
+
+	read_lock_bh(&idev->lock);
+	for (ifaca = idev->ac_list; ifaca; ifaca = ifaca->aca_next) {
+		if (*count >= SIR_MAC_NUM_TARGET_IPV6_NS_OFFLOAD_NA) {
+			read_unlock_bh(&idev->lock);
+			return -EINVAL;
+		}
+		/* For anycast addr no DAD */
+		scope = ipv6_addr_src_scope(&ifaca->aca_addr);
+		switch (scope) {
+		case IPV6_ADDR_SCOPE_GLOBAL:
+		case IPV6_ADDR_SCOPE_LINKLOCAL:
+			vos_mem_copy(ipv6_ac_addr[*count], &ifaca->aca_addr,
+				sizeof(ifaca->aca_addr));
+			ipv6addr_type[*count] = SIR_IPV6_ADDR_AC_TYPE;
+			hddLog (LOG1,
+				FL("Index %d scope = %s AC-Address: %pI6"),
+				*count, (scope == IPV6_ADDR_SCOPE_LINKLOCAL) ?
+				"LINK LOCAL": "GLOBAL", ipv6_ac_addr[*count]);
+			*count += 1;
+			break;
+		default:
+			hddLog(LOGE, "The Scope %d is not supported", scope);
+		}
+	}
+
+	read_unlock_bh(&idev->lock);
+	return 0;
+}
+
 /**----------------------------------------------------------------------------
 
   \brief hdd_conf_ns_offload() - Configure NS offload
@@ -624,19 +755,18 @@ int wlan_hdd_ipv6_changed(struct notifier_block *nb,
   \return - void
 
   ---------------------------------------------------------------------------*/
-static void hdd_conf_ns_offload(hdd_adapter_t *pAdapter, int fenable)
+void hdd_conf_ns_offload(hdd_adapter_t *pAdapter, int fenable)
 {
     struct inet6_dev *in6_dev;
-    struct inet6_ifaddr *ifp;
-    struct list_head *p;
-    tANI_U8 selfIPv6Addr[SIR_MAC_NUM_TARGET_IPV6_NS_OFFLOAD_NA][SIR_MAC_IPV6_ADDR_LEN] = {{0,}};
-    tANI_BOOLEAN selfIPv6AddrValid[SIR_MAC_NUM_TARGET_IPV6_NS_OFFLOAD_NA] = {0};
+    uint8_t ipv6_addr[SIR_MAC_NUM_TARGET_IPV6_NS_OFFLOAD_NA]
+                                     [SIR_MAC_IPV6_ADDR_LEN] = {{0,}};
+    uint8_t ipv6_addr_type[SIR_MAC_NUM_TARGET_IPV6_NS_OFFLOAD_NA] = {0};
     tSirHostOffloadReq offLoadRequest;
     hdd_context_t *pHddCtx;
 
-    int i =0;
+    int i = 0, ret;
     eHalStatus returnStatus;
-    uint32_t count = 0, scope;
+    uint32_t count = 0;
 
     ENTER();
     hddLog(LOG1, FL(" fenable = %d"), fenable);
@@ -657,31 +787,34 @@ static void hdd_conf_ns_offload(hdd_adapter_t *pAdapter, int fenable)
     if (fenable) {
         in6_dev = __in6_dev_get(pAdapter->dev);
         if (NULL != in6_dev) {
-            list_for_each(p, &in6_dev->addr_list) {
-                if (count >= SIR_MAC_NUM_TARGET_IPV6_NS_OFFLOAD_NA) {
-                     hddLog(LOG1, FL("Reached max supported NS Offload addresses"));
-                     break;
-                }
-                ifp = list_entry(p, struct inet6_ifaddr, if_list);
-                scope = ipv6_addr_src_scope(&ifp->addr);
-                switch (scope) {
-                case IPV6_ADDR_SCOPE_GLOBAL:
-                case IPV6_ADDR_SCOPE_LINKLOCAL:
-                     vos_mem_copy(&selfIPv6Addr[count], &ifp->addr.s6_addr,
-                            sizeof(ifp->addr.s6_addr));
-                     selfIPv6AddrValid[count] = SIR_IPV6_ADDR_VALID;
-                     hddLog (LOG1,
-                        FL("Index %d scope = %s Address : %pI6"),
-                        count, (scope == IPV6_ADDR_SCOPE_LINKLOCAL) ?
-                        "LINK LOCAL": "GLOBAL", selfIPv6Addr[count]);
-                     count += 1;
-                     break;
-                default:
-                     hddLog(LOGE, "The Scope %d is not supported",
-                          ipv6_addr_src_scope(&ifp->addr));
-                }
+            /* Unicast Addresses */
+            ret = hdd_fill_ipv6_uc_addr(in6_dev, ipv6_addr,
+                                        ipv6_addr_type, &count);
 
+            if (0 > ret) {
+                if (pHddCtx->cfg_ini->active_mode_offload)
+                    goto disable_ns;
+                else {
+                     hddLog(LOG1,
+                            FL("Reached max supported addresses and not enabling NS offload"));
+                     return;
+                }
             }
+
+            /* Anycast Addresses */
+            ret = hdd_fill_ipv6_ac_addr(in6_dev, ipv6_addr,
+                                        ipv6_addr_type, &count);
+
+            if (0 > ret) {
+                if (pHddCtx->cfg_ini->active_mode_offload)
+                    goto disable_ns;
+                else {
+                    hddLog(LOG1,
+                        FL("Reached max supported addresses and not enabling NS offload"));
+                    return;
+                }
+            }
+
             vos_mem_zero(&offLoadRequest, sizeof(offLoadRequest));
             for (i = 0; i < count; i++) {
                 /* Filling up the request structure
@@ -699,34 +832,22 @@ static void hdd_conf_ns_offload(hdd_adapter_t *pAdapter, int fenable)
                 offLoadRequest.nsOffloadInfo.selfIPv6Addr[i][11] = 0x01;
                 offLoadRequest.nsOffloadInfo.selfIPv6Addr[i][12] = 0xFF;
                 offLoadRequest.nsOffloadInfo.selfIPv6Addr[i][13] =
-                                                  selfIPv6Addr[i][13];
+                                                       ipv6_addr[i][13];
                 offLoadRequest.nsOffloadInfo.selfIPv6Addr[i][14] =
-                                                   selfIPv6Addr[i][14];
+                                                       ipv6_addr[i][14];
                 offLoadRequest.nsOffloadInfo.selfIPv6Addr[i][15] =
-                                                    selfIPv6Addr[i][15];
+                                                       ipv6_addr[i][15];
                 offLoadRequest.nsOffloadInfo.slotIdx = i;
 
                 vos_mem_copy(&offLoadRequest.nsOffloadInfo.targetIPv6Addr[i],
-                   &selfIPv6Addr[i][0], SIR_MAC_IPV6_ADDR_LEN);
+                   &ipv6_addr[i][0], SIR_MAC_IPV6_ADDR_LEN);
 
                 offLoadRequest.nsOffloadInfo.targetIPv6AddrValid[i] =
                                                     SIR_IPV6_ADDR_VALID;
-
-                hddLog (LOG1,
-                    FL("configuredMcastBcastFilter: %d"),
-                    pHddCtx->configuredMcastBcastFilter);
-
-                if ((VOS_TRUE == pHddCtx->sus_res_mcastbcast_filter_valid)
-                   && ((HDD_MCASTBCASTFILTER_FILTER_ALL_MULTICAST ==
-                     pHddCtx->sus_res_mcastbcast_filter) ||
-                     (HDD_MCASTBCASTFILTER_FILTER_ALL_MULTICAST_BROADCAST ==
-                     pHddCtx->sus_res_mcastbcast_filter))) {
-                        hddLog(LOG1,
-                            FL("Set offLoadRequest with SIR_OFFLOAD_NS_AND_MCAST_FILTER_ENABLE"));
-                        offLoadRequest.enableOrDisable =
-                            SIR_OFFLOAD_NS_AND_MCAST_FILTER_ENABLE;
-                }
-
+                offLoadRequest.nsOffloadInfo.target_ipv6_addr_type[i] =
+                                                       ipv6_addr_type[i];
+                hdd_wlan_offload_event(SIR_IPV6_NS_OFFLOAD,
+                                               SIR_OFFLOAD_ENABLE);
                 vos_mem_copy(&offLoadRequest.params.hostIpv6Addr,
                    &offLoadRequest.nsOffloadInfo.targetIPv6Addr[i],
                    sizeof(tANI_U8)*SIR_MAC_IPV6_ADDR_LEN);
@@ -736,6 +857,11 @@ static void hdd_conf_ns_offload(hdd_adapter_t *pAdapter, int fenable)
                    &offLoadRequest.nsOffloadInfo.selfIPv6Addr[i],
                    &offLoadRequest.nsOffloadInfo.targetIPv6Addr[i], i);
             }
+
+            hddLog (LOG1,
+                FL("configuredMcastBcastFilter: %d"),
+                pHddCtx->configuredMcastBcastFilter);
+
             offLoadRequest.offloadType =  SIR_IPV6_NS_OFFLOAD;
             offLoadRequest.enableOrDisable = SIR_OFFLOAD_ENABLE;
             vos_mem_copy(&offLoadRequest.nsOffloadInfo.selfMacAddr,
@@ -757,10 +883,14 @@ static void hdd_conf_ns_offload(hdd_adapter_t *pAdapter, int fenable)
             return;
         }
     } else {
+disable_ns:
         /* Disable NSOffload */
+        hddLog(LOG1, FL("Disable NS Offload"));
         vos_mem_zero((void *)&offLoadRequest, sizeof(tSirHostOffloadReq));
         offLoadRequest.enableOrDisable = SIR_OFFLOAD_DISABLE;
         offLoadRequest.offloadType =  SIR_IPV6_NS_OFFLOAD;
+        hdd_wlan_offload_event(SIR_IPV6_NS_OFFLOAD,
+                                           SIR_OFFLOAD_DISABLE);
 
         if (eHAL_STATUS_SUCCESS !=
              sme_SetHostOffload(WLAN_HDD_GET_HAL_CTX(pAdapter),
@@ -784,6 +914,7 @@ static void __hdd_ipv6_notifier_work_queue(struct work_struct *work)
              container_of(work, hdd_adapter_t, ipv6NotifierWorkQueue);
     hdd_context_t *pHddCtx;
     int status;
+    bool ndi_connected = false;
 
     ENTER();
 
@@ -792,6 +923,11 @@ static void __hdd_ipv6_notifier_work_queue(struct work_struct *work)
     if (0 != status)
         return;
 
+   if (!pHddCtx->cfg_ini->active_mode_offload) {
+       hddLog(LOG1, FL("Active mode offload is disabled"));
+       return;
+   }
+
     if ( VOS_FALSE == pHddCtx->sus_res_mcastbcast_filter_valid)
     {
         pHddCtx->sus_res_mcastbcast_filter =
@@ -799,10 +935,13 @@ static void __hdd_ipv6_notifier_work_queue(struct work_struct *work)
         pHddCtx->sus_res_mcastbcast_filter_valid = VOS_TRUE;
     }
 
+    /* check if the device is in NAN data mode */
+    if (WLAN_HDD_IS_NDI(pAdapter))
+        ndi_connected = WLAN_HDD_IS_NDI_CONNECTED(pAdapter);
+
     if ((eConnectionState_Associated ==
-                (WLAN_HDD_GET_STATION_CTX_PTR(pAdapter))->conn_info.connState)
-        && (pHddCtx->hdd_wlan_suspended))
-    {
+            (WLAN_HDD_GET_STATION_CTX_PTR(pAdapter))->conn_info.connState ||
+         ndi_connected)) {
         /*
          * This invocation being part of the IPv6 registration callback,
          * we are passing second parameter as 2 to avoid registration
@@ -848,8 +987,7 @@ void hdd_conf_hostoffload(hdd_adapter_t *pAdapter, v_BOOL_t fenable)
 
     pVosContext = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
 
-    if (NULL == pVosContext)
-    {
+    if (NULL == pVosContext) {
         hddLog(VOS_TRACE_LEVEL_ERROR, FL(" Global VOS context is Null"));
         return;
     }
@@ -857,8 +995,7 @@ void hdd_conf_hostoffload(hdd_adapter_t *pAdapter, v_BOOL_t fenable)
     //Get the HDD context.
     pHddCtx = (hdd_context_t *)vos_get_context(VOS_MODULE_ID_HDD, pVosContext );
 
-    if (NULL == pHddCtx)
-    {
+    if (NULL == pHddCtx) {
         hddLog(VOS_TRACE_LEVEL_ERROR, "%s: HDD context is Null", __func__);
         return;
     }
@@ -868,98 +1005,100 @@ void hdd_conf_hostoffload(hdd_adapter_t *pAdapter, v_BOOL_t fenable)
                (WLAN_HDD_SOFTAP == pAdapter->device_mode) ||
                (WLAN_HDD_P2P_GO == pAdapter->device_mode))
     {
-        if (fenable)
-        {
+        if (fenable) {
             if ((eConnectionState_Associated ==
-                    (WLAN_HDD_GET_STATION_CTX_PTR(pAdapter))->conn_info.connState) ||
+                (WLAN_HDD_GET_STATION_CTX_PTR(pAdapter))->conn_info.connState) ||
                 (WLAN_HDD_SOFTAP == pAdapter->device_mode) ||
-                (WLAN_HDD_P2P_GO == pAdapter->device_mode))
-            {
-                if ((pHddCtx->cfg_ini->fhostArpOffload))
-                {
-                    /*
-                     * Configure the ARP Offload.
-                     * Even if it fails we have to reconfigure the MC/BC
-                     * filter flag as we want RIVA not to drop BroadCast
-                     * Packets
-                     */
-                    hddLog(VOS_TRACE_LEVEL_INFO,
-                            FL("Calling ARP Offload with flag: %d"), fenable);
-                    vstatus = hdd_conf_arp_offload(pAdapter, fenable);
-                    pHddCtx->configuredMcastBcastFilter &=
-                            ~(HDD_MCASTBCASTFILTER_FILTER_ALL_BROADCAST);
+                (WLAN_HDD_P2P_GO == pAdapter->device_mode)) {
+                    if (!pHddCtx->cfg_ini->active_mode_offload) {
+                         if ((pHddCtx->cfg_ini->fhostArpOffload)) {
+                            /*
+                             * Configure the ARP Offload.
+                             * Even if it fails we have to reconfigure the MC/BC
+                             * filter flag as we want RIVA not to drop BroadCast
+                             * Packets
+                             */
+                             hddLog(VOS_TRACE_LEVEL_INFO,
+                                FL("Calling ARP Offload with flag: %d"),
+                                fenable);
+                             vstatus = hdd_conf_arp_offload(pAdapter, fenable);
+                             pHddCtx->configuredMcastBcastFilter &=
+                                ~(HDD_MCASTBCASTFILTER_FILTER_ALL_BROADCAST);
 
-                    if (!VOS_IS_STATUS_SUCCESS(vstatus))
-                    {
-                        hddLog(VOS_TRACE_LEVEL_ERROR,
-                                "Failed to enable ARPOFfloadFeature %d",
-                                vstatus);
-                    }
-                }
-                //Configure GTK_OFFLOAD
-#ifdef WLAN_FEATURE_GTK_OFFLOAD
-                hdd_conf_gtk_offload(pAdapter, fenable);
-#endif
-
+                             if (!VOS_IS_STATUS_SUCCESS(vstatus)) {
+                                 hddLog(VOS_TRACE_LEVEL_INFO,
+                                    "Failed to enable ARPOFfloadFeature %d",
+                                    vstatus);
+                             }
+                         }
 #ifdef WLAN_NS_OFFLOAD
-                if (pHddCtx->cfg_ini->fhostNSOffload)
-                {
-                    /*
-                     * Configure the NS Offload.
-                     * Even if it fails we have to reconfigure the MC/BC filter flag
-                     * as we want RIVA not to drop Multicast Packets
-                     */
+                         if (pHddCtx->cfg_ini->fhostNSOffload &&
+                             pHddCtx->ns_offload_enable) {
+                             /*
+                              * Configure the NS Offload.
+                              * Even if it fails we have to reconfigure the
+                              * MC/BC filter flag as we want RIVA not to
+                              * drop Multicast Packets
+                              */
 
-                    hddLog(VOS_TRACE_LEVEL_INFO,
-                            FL("Calling NS Offload with flag: %d"), fenable);
-                    hdd_conf_ns_offload(pAdapter, fenable);
-                    pHddCtx->configuredMcastBcastFilter &=
-                            ~(HDD_MCASTBCASTFILTER_FILTER_ALL_MULTICAST);
-                }
-
+                              hddLog(VOS_TRACE_LEVEL_INFO,
+                                  FL("Calling NS Offload with flag: %d"),
+                                  fenable);
+                              hdd_conf_ns_offload(pAdapter, fenable);
+                              pHddCtx->configuredMcastBcastFilter &=
+                                  ~(HDD_MCASTBCASTFILTER_FILTER_ALL_MULTICAST);
+                         }
 #endif
-                /*
-                * This variable saves the state if offload were configured
-                * or not. helps in recovering when pcie fails to suspend
-                * because of ongoing scan and state is no longer associated.
-                */
-                pAdapter->offloads_configured = TRUE;
+                    }
+
+                    /* Configure GTK_OFFLOAD */
+#ifdef WLAN_FEATURE_GTK_OFFLOAD
+                    hdd_conf_gtk_offload(pAdapter, fenable);
+#endif
+
+                    /*
+                     * This variable saves the state if offload were configured
+                     * or not. helps in recovering when pcie fails to suspend
+                     * because of ongoing scan and state is no longer
+                     * associated.
+                     */
+                     pAdapter->offloads_configured = TRUE;
             }
-        }
-        else
-        {
-            //Disable ARPOFFLOAD
-            if ( (eConnectionState_Associated ==
+        } else {
+            /* Disable offlaod features */
+            if ((eConnectionState_Associated ==
                  (WLAN_HDD_GET_STATION_CTX_PTR(pAdapter))->conn_info.connState) ||
-                 (pAdapter->offloads_configured == TRUE)
-               )
-            {
-                pAdapter->offloads_configured = FALSE;
+                 (pAdapter->offloads_configured == TRUE)) {
 
-                if (pHddCtx->cfg_ini->fhostArpOffload)
-                {
-                    vstatus = hdd_conf_arp_offload(pAdapter, fenable);
-                    if (!VOS_IS_STATUS_SUCCESS(vstatus))
-                    {
-                        hddLog(VOS_TRACE_LEVEL_ERROR,
-                             "Failed to disable ARPOffload Feature %d", vstatus);
-                    }
-                }
-               //Disable GTK_OFFLOAD
-#ifdef WLAN_FEATURE_GTK_OFFLOAD
-                hdd_conf_gtk_offload(pAdapter, fenable);
-#endif
+                  pAdapter->offloads_configured = FALSE;
+
+                  /* Disable ARPOFFLOAD */
+                  if (!pHddCtx->cfg_ini->active_mode_offload) {
+                      if (pHddCtx->cfg_ini->fhostArpOffload) {
+                          vstatus = hdd_conf_arp_offload(pAdapter, fenable);
+                          if (!VOS_IS_STATUS_SUCCESS(vstatus)) {
+                              hddLog(VOS_TRACE_LEVEL_ERROR,
+                                 "Failed to disable ARPOffload Feature %d",
+                                 vstatus);
+                          }
+                      }
 
 #ifdef WLAN_NS_OFFLOAD
-                //Disable NSOFFLOAD
-                if (pHddCtx->cfg_ini->fhostNSOffload)
-                {
-                    hdd_conf_ns_offload(pAdapter, fenable);
-                }
+                      /* Disable NSOFFLOAD */
+                      if (pHddCtx->cfg_ini->fhostNSOffload &&
+                          pHddCtx->ns_offload_enable) {
+                             hdd_conf_ns_offload(pAdapter, fenable);
+                      }
+#endif
+                 }
+                 /* Disable GTK_OFFLOAD*/
+#ifdef WLAN_FEATURE_GTK_OFFLOAD
+                 hdd_conf_gtk_offload(pAdapter, fenable);
 #endif
             }
         }
     }
+
     EXIT();
     return;
 }
@@ -976,30 +1115,37 @@ static void __hdd_ipv4_notifier_work_queue(struct work_struct *work)
              container_of(work, hdd_adapter_t, ipv4NotifierWorkQueue);
     hdd_context_t *pHddCtx;
     int status;
+    bool ndi_connected = false;
 
     hddLog(LOG1, FL("Reconfiguring ARP Offload"));
     pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
     status = wlan_hdd_validate_context(pHddCtx);
     if (0 != status)
-    {
-        hddLog(LOGE, FL("HDD context is invalid"));
+        return;
+
+    if (!pHddCtx->cfg_ini->active_mode_offload) {
+        hddLog(LOG1, FL("Active mode offload is disabled"));
         return;
     }
 
-    if ( VOS_FALSE == pHddCtx->sus_res_mcastbcast_filter_valid)
-    {
+    if (VOS_FALSE == pHddCtx->sus_res_mcastbcast_filter_valid) {
         pHddCtx->sus_res_mcastbcast_filter =
             pHddCtx->configuredMcastBcastFilter;
         pHddCtx->sus_res_mcastbcast_filter_valid = VOS_TRUE;
     }
 
+    /* check if the device is in NAN data mode */
+    if (WLAN_HDD_IS_NDI(pAdapter))
+        ndi_connected = WLAN_HDD_IS_NDI_CONNECTED(pAdapter);
+
     if ((eConnectionState_Associated ==
-                (WLAN_HDD_GET_STATION_CTX_PTR(pAdapter))->conn_info.connState)
-        && (pHddCtx->hdd_wlan_suspended))
-    {
-        // This invocation being part of the IPv4 registration callback,
-        // we are passing second parameter as 2 to avoid registration
-        // of IPv4 notifier again.
+            (WLAN_HDD_GET_STATION_CTX_PTR(pAdapter))->conn_info.connState ||
+         ndi_connected)) {
+        /*
+         * This invocation being part of the IPv4 registration callback,
+         * we are passing second parameter as 2 to avoid registration
+         * of IPv4 notifier again.
+         */
         hdd_conf_arp_offload(pAdapter, 2);
     }
 }
@@ -1030,10 +1176,8 @@ static int __wlan_hdd_ipv4_changed(struct notifier_block *nb,
 
 	hdd_ctx = container_of(nb, hdd_context_t, ipv4_notifier);
 	status = wlan_hdd_validate_context(hdd_ctx);
-	if (0 != status) {
-		hddLog(LOGE, FL("HDD context is invalid"));
+	if (0 != status)
 		return NOTIFY_DONE;
-	}
 
 	adapter = WLAN_HDD_GET_PRIV_PTR(ndev);
 	if (!adapter) return NOTIFY_DONE;
@@ -1041,8 +1185,15 @@ static int __wlan_hdd_ipv4_changed(struct notifier_block *nb,
 	if (adapter->dev != ndev) return NOTIFY_DONE;
 	if (WLAN_HDD_GET_CTX(adapter) != hdd_ctx) return NOTIFY_DONE;
         if (!(adapter->device_mode == WLAN_HDD_INFRA_STATION ||
-                adapter->device_mode == WLAN_HDD_P2P_CLIENT))
+	      adapter->device_mode == WLAN_HDD_P2P_CLIENT ||
+	      adapter->device_mode == WLAN_HDD_NDI))
 		return NOTIFY_DONE;
+
+	if (eConnectionState_Associated ==
+		WLAN_HDD_GET_STATION_CTX_PTR(
+		adapter)->conn_info.connState)
+			sme_dhcp_done_ind(hdd_ctx->hHal,
+			adapter->sessionId);
 
 	if ((hdd_ctx->cfg_ini->nEnableSuspend !=
 				WLAN_MAP_SUSPEND_TO_MCAST_BCAST_FILTER) ||
@@ -1120,7 +1271,8 @@ VOS_STATUS hdd_conf_arp_offload(hdd_adapter_t *pAdapter, int fenable)
    tSirHostOffloadReq  offLoadRequest;
    hdd_context_t *pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
 
-   hddLog(LOG1, FL(" fenable = %d \n"), fenable);
+   hddLog(LOG1, FL("fenable = %d"), fenable);
+
 
    /* In SAP/P2PGo mode, ARP/NS offload feature capability
     * is controlled by one bit.
@@ -1149,6 +1301,8 @@ VOS_STATUS hdd_conf_arp_offload(hdd_adapter_t *pAdapter, int fenable)
        {
            offLoadRequest.offloadType =  SIR_IPV4_ARP_REPLY_OFFLOAD;
            offLoadRequest.enableOrDisable = SIR_OFFLOAD_ENABLE;
+           hdd_wlan_offload_event(SIR_IPV4_ARP_REPLY_OFFLOAD,
+                                           SIR_OFFLOAD_ENABLE);
 
            hddLog(VOS_TRACE_LEVEL_INFO, "%s: Enabled", __func__);
 
@@ -1163,7 +1317,8 @@ VOS_STATUS hdd_conf_arp_offload(hdd_adapter_t *pAdapter, int fenable)
                hddLog(VOS_TRACE_LEVEL_INFO,
                       "offload: inside arp offload conditional check");
            }
-
+           hdd_wlan_offload_event(SIR_OFFLOAD_ARP_AND_BCAST_FILTER_ENABLE,
+                                           SIR_OFFLOAD_ENABLE);
            hddLog(VOS_TRACE_LEVEL_INFO, "offload: arp filter programmed = %d",
                   offLoadRequest.enableOrDisable);
 
@@ -1200,6 +1355,8 @@ VOS_STATUS hdd_conf_arp_offload(hdd_adapter_t *pAdapter, int fenable)
        vos_mem_zero((void *)&offLoadRequest, sizeof(tSirHostOffloadReq));
        offLoadRequest.enableOrDisable = SIR_OFFLOAD_DISABLE;
        offLoadRequest.offloadType =  SIR_IPV4_ARP_REPLY_OFFLOAD;
+       hdd_wlan_offload_event(SIR_IPV4_ARP_REPLY_OFFLOAD,
+                                           SIR_OFFLOAD_DISABLE);
 
        if (eHAL_STATUS_SUCCESS !=
                  sme_SetHostOffload(WLAN_HDD_GET_HAL_CTX(pAdapter),
@@ -1329,7 +1486,7 @@ static void hdd_conf_suspend_ind(hdd_context_t* pHddCtx,
     hddLog(VOS_TRACE_LEVEL_INFO,
       "%s: send wlan suspend indication", __func__);
 
-    if (pHddCtx->cfg_ini->nEnableSuspend == WLAN_MAP_SUSPEND_TO_MCAST_BCAST_FILTER)
+    if(pHddCtx->cfg_ini->nEnableSuspend == WLAN_MAP_SUSPEND_TO_MCAST_BCAST_FILTER)
     {
         //Configure supported OffLoads
         hdd_conf_hostoffload(pAdapter, TRUE);
@@ -1394,9 +1551,40 @@ static void hdd_conf_resume_ind(hdd_adapter_t *pAdapter)
                   pHddCtx->configuredMcastBcastFilter);
 }
 
+#ifdef FEATURE_WLAN_THERMAL_SHUTDOWN
+static void hdd_thermal_off_carrier(hdd_adapter_t *pAdapter)
+{
+	if (netif_carrier_ok(pAdapter->dev)) {
+		pAdapter->netif_carrier_on = TRUE;
+		wlan_hdd_netif_queue_control(pAdapter,
+		  WLAN_NETIF_CARRIER_OFF, WLAN_CONTROL_PATH);
+	} else {
+		pAdapter->netif_carrier_on = FALSE;
+	}
+}
+
+static void hdd_thermal_on_carrier(hdd_adapter_t *pAdapter)
+{
+	if (pAdapter->netif_carrier_on) {
+	/* Thermal shutdown is an urgent accident visible to user space. */
+		wlan_hdd_netif_queue_control(pAdapter,
+			WLAN_NETIF_CARRIER_ON, WLAN_CONTROL_PATH);
+	}
+}
+#else
+static inline void hdd_thermal_off_carrier(hdd_adapter_t *pAdapter)
+{
+	return;
+}
+
+static inline void hdd_thermal_on_carrier(hdd_adapter_t *pAdapter)
+{
+	return;
+}
+#endif
 //Suspend routine registered with Android OS
 void hdd_suspend_wlan(void (*callback)(void *callbackContext, boolean suspended),
-                      void *callbackContext)
+                      void *callbackContext, bool thermal)
 {
    hdd_context_t *pHddCtx = NULL;
    v_CONTEXT_t pVosContext = NULL;
@@ -1405,6 +1593,7 @@ void hdd_suspend_wlan(void (*callback)(void *callbackContext, boolean suspended)
    hdd_adapter_t *pAdapter = NULL;
    hdd_adapter_list_node_t *pAdapterNode = NULL, *pNext = NULL;
    bool hdd_enter_bmps = FALSE;
+   enum netif_action_type action;
 
    hddLog(VOS_TRACE_LEVEL_INFO, "%s: WLAN being suspended by Android OS",__func__);
 
@@ -1462,8 +1651,9 @@ void hdd_suspend_wlan(void (*callback)(void *callbackContext, boolean suspended)
        {
           //stop the interface before putting the chip to standby
           hddLog(LOG1, FL("Disabling queues"));
-          netif_tx_disable(pAdapter->dev);
-          netif_carrier_off(pAdapter->dev);
+          wlan_hdd_netif_queue_control(pAdapter,
+            WLAN_NETIF_TX_DISABLE_N_CARRIER,
+            WLAN_CONTROL_PATH);
        }
        else if (pHddCtx->cfg_ini->nEnableSuspend ==
                WLAN_MAP_SUSPEND_TO_DEEP_SLEEP)
@@ -1476,7 +1666,14 @@ void hdd_suspend_wlan(void (*callback)(void *callbackContext, boolean suspended)
 send_suspend_ind:
        //stop all TX queues before suspend
        hddLog(LOG1, FL("Disabling queues"));
-       netif_tx_disable(pAdapter->dev);
+
+      /* Thermal shutdown is an urgent accident visible to user space. */
+        if (thermal) {
+            hdd_thermal_off_carrier(pAdapter);
+        }
+       action = pHddCtx->is_nonos_suspend ? WLAN_NETIF_TX_DISABLE_N_CARRIER :
+                                            WLAN_NETIF_TX_DISABLE;
+       wlan_hdd_netif_queue_control(pAdapter, action, WLAN_CONTROL_PATH);
        WLANTL_PauseUnPauseQs(pVosContext, true);
 
       /* Keep this suspend indication at the end (before processing next adaptor)
@@ -1490,7 +1687,7 @@ send_suspend_ind:
    }
 
    pHddCtx->hdd_wlan_suspended = TRUE;
-
+   hdd_wlan_suspend_resume_event(HDD_WLAN_EARLY_SUSPEND);
 #ifdef SUPPORT_EARLY_SUSPEND_STANDBY_DEEPSLEEP
   if(pHddCtx->cfg_ini->nEnableSuspend == WLAN_MAP_SUSPEND_TO_STANDBY)
   {
@@ -1516,10 +1713,10 @@ static void hdd_PowerStateChangedCB
    {
        pHddCtx->hdd_ignore_dtim_enabled = TRUE;
    }
-   spin_lock(&pHddCtx->filter_lock);
+   adf_os_spin_lock(&pHddCtx->filter_lock);
    if ((newState == BMPS) &&  pHddCtx->hdd_wlan_suspended)
    {
-      spin_unlock(&pHddCtx->filter_lock);
+      adf_os_spin_unlock(&pHddCtx->filter_lock);
       if (VOS_FALSE == pHddCtx->sus_res_mcastbcast_filter_valid)
       {
           pHddCtx->sus_res_mcastbcast_filter =
@@ -1547,20 +1744,20 @@ static void hdd_PowerStateChangedCB
        * resume request will be lost. So reconfigure the filters on detecting
        * a change in the power state of the WCN chip.
        */
-      spin_unlock(&pHddCtx->filter_lock);
+      adf_os_spin_unlock(&pHddCtx->filter_lock);
       if (IMPS != newState)
       {
-           spin_lock(&pHddCtx->filter_lock);
+           adf_os_spin_lock(&pHddCtx->filter_lock);
            if (FALSE == pHddCtx->hdd_wlan_suspended)
            {
-                spin_unlock(&pHddCtx->filter_lock);
+                adf_os_spin_unlock(&pHddCtx->filter_lock);
                 hddLog(VOS_TRACE_LEVEL_INFO,
                           "Not in IMPS/BMPS and suspended state");
                 hdd_conf_mcastbcast_filter(pHddCtx, FALSE);
            }
            else
            {
-                spin_unlock(&pHddCtx->filter_lock);
+                adf_os_spin_unlock(&pHddCtx->filter_lock);
            }
       }
    }
@@ -1586,7 +1783,7 @@ void hdd_register_mcast_bcast_filter(hdd_context_t *pHddCtx)
       return;
    }
 
-   spin_lock_init(&pHddCtx->filter_lock);
+   adf_os_spinlock_init(&pHddCtx->filter_lock);
    if (WLAN_MAP_SUSPEND_TO_MCAST_BCAST_FILTER ==
                                             pHddCtx->cfg_ini->nEnableSuspend)
    {
@@ -1629,13 +1826,14 @@ void hdd_unregister_mcast_bcast_filter(hdd_context_t *pHddCtx)
    }
 }
 
-void hdd_resume_wlan(void)
+void hdd_resume_wlan(bool thermal)
 {
    hdd_context_t *pHddCtx = NULL;
    hdd_adapter_t *pAdapter = NULL;
    hdd_adapter_list_node_t *pAdapterNode = NULL, *pNext = NULL;
    VOS_STATUS status;
    v_CONTEXT_t pVosContext = NULL;
+   enum netif_action_type action;
 
    hddLog(VOS_TRACE_LEVEL_INFO, "%s: WLAN being resumed by Android OS",__func__);
 
@@ -1662,7 +1860,7 @@ void hdd_resume_wlan(void)
    }
 
    pHddCtx->hdd_wlan_suspended = FALSE;
-
+   hdd_wlan_suspend_resume_event(HDD_WLAN_EARLY_RESUME);
    /*loop through all adapters. Concurrency */
    status = hdd_get_front_adapter ( pHddCtx, &pAdapterNode );
 
@@ -1723,9 +1921,16 @@ void hdd_resume_wlan(void)
 send_resume_ind:
       //wake the tx queues
       hddLog(LOG1, FL("Enabling queues"));
+
       WLANTL_PauseUnPauseQs(pVosContext, false);
 
-      netif_tx_wake_all_queues(pAdapter->dev);
+      action = pHddCtx->is_nonos_suspend ? WLAN_START_ALL_NETIF_QUEUE_N_CARRIER :
+                                           WLAN_WAKE_ALL_NETIF_QUEUE;
+      wlan_hdd_netif_queue_control(pAdapter, action, WLAN_CONTROL_PATH);
+
+      if (thermal) {
+        hdd_thermal_on_carrier(pAdapter);
+      }
 
       hdd_conf_resume_ind(pAdapter);
 
@@ -1769,21 +1974,26 @@ VOS_STATUS hdd_wlan_reset_initialization(void)
    return VOS_STATUS_SUCCESS;
 }
 
-static void hdd_ssr_timer_init(void)
-{
-    init_timer(&ssr_timer);
-}
-
 static void hdd_ssr_timer_del(void)
 {
-    del_timer(&ssr_timer);
+    adf_os_timer_cancel(&ssr_timer);
     ssr_timer_started = false;
 }
 
-static void hdd_ssr_timer_cb(unsigned long data)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+static void hdd_ssr_timer_cb(struct timer_list *t)
+#else
+static void hdd_ssr_timer_cb(void *data)
+#endif
 {
     hddLog(VOS_TRACE_LEVEL_FATAL, "%s: HDD SSR timer expired!", __func__);
     VOS_BUG(0);
+}
+
+static void hdd_ssr_timer_init(void)
+{
+    adf_os_timer_init(NULL, &ssr_timer,
+                      hdd_ssr_timer_cb, NULL, ADF_NON_DEFERRABLE_TIMER);
 }
 
 static void hdd_ssr_timer_start(int msec)
@@ -1793,34 +2003,83 @@ static void hdd_ssr_timer_start(int msec)
         hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Trying to start SSR timer when "
                "it's running!", __func__);
     }
-    ssr_timer.expires = jiffies + msecs_to_jiffies(msec);
-    ssr_timer.function = hdd_ssr_timer_cb;
-    add_timer(&ssr_timer);
+    adf_os_timer_start(&ssr_timer, msec);
     ssr_timer_started = true;
 }
 
-#ifdef CONFIG_SEC
 /**
- * hdd_send_hang_reason() - Send hang reason to the userspace
+ * hdd_svc_fw_shutdown_ind() - API to send FW SHUTDOWN IND to Userspace
+ *
+ * @dev: Device Pointer
  *
  * Return: None
  */
-static void hdd_send_hang_reason(hdd_context_t *hdd_ctx)
+void hdd_svc_fw_shutdown_ind(struct device *dev)
 {
-	unsigned int reason = 0;
+	v_CONTEXT_t g_context;
+	hdd_context_t *hdd_ctx;
 
-	if(!hdd_ctx) {
-		hddLog(VOS_TRACE_LEVEL_FATAL,"%s: HDD context is Null",
-		       __func__);
+	g_context = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
 
+	if(!g_context)
 		return;
-	}
 
-	vos_get_recovery_reason(&reason);
-	vos_reset_recovery_reason();
-	wlan_hdd_send_hang_reason_event(hdd_ctx, reason);
+	hdd_ctx = (hdd_context_t *)vos_get_context(VOS_MODULE_ID_HDD,
+						   g_context);
+
+	hdd_ctx ? wlan_hdd_send_svc_nlink_msg(hdd_ctx->radio_index,
+					      WLAN_SVC_FW_SHUTDOWN_IND,
+					      NULL, 0) : 0;
 }
-#endif /* CONFIG_SEC */
+
+/**
+ * hdd_svc_fw_crashed_ind() - API to send FW CRASHED IND to Userspace
+ *
+ * @dev: Device Pointer
+ *
+ * Return: None
+ */
+void hdd_svc_fw_crashed_ind(struct device *dev)
+{
+	v_CONTEXT_t g_context;
+	hdd_context_t *hdd_ctx;
+
+	g_context = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
+
+	if(!g_context)
+		return;
+
+	hdd_ctx = (hdd_context_t *)vos_get_context(VOS_MODULE_ID_HDD,
+						   g_context);
+
+	hdd_ctx ? wlan_hdd_send_svc_nlink_msg(hdd_ctx->radio_index,
+					      WLAN_SVC_FW_CRASHED_IND,
+					      NULL, 0) : 0;
+}
+
+#ifdef FEATURE_WLAN_DIAG_SUPPORT
+/**
+* hdd_wlan_ssr_shutdown_event() - Send ssr shutdown status
+*
+* This function sends ssr shutdown status diag event
+*
+* Return: - Void.
+*/
+static void hdd_wlan_ssr_shutdown_event(void)
+{
+	WLAN_VOS_DIAG_EVENT_DEF(ssr_shutdown,
+					struct host_event_wlan_ssr_shutdown);
+	vos_mem_zero(&ssr_shutdown, sizeof(ssr_shutdown));
+	ssr_shutdown.status = SSR_SUB_SYSTEM_SHUTDOWN;
+	WLAN_VOS_DIAG_EVENT_REPORT(&ssr_shutdown,
+					EVENT_WLAN_SSR_SHUTDOWN_SUBSYSTEM);
+}
+#else
+static inline void hdd_wlan_ssr_shutdown_event(void)
+{
+
+};
+#endif
 
 /* the HDD interface to WLAN driver shutdown,
  * the primary shutdown function in SSR
@@ -1833,10 +2092,6 @@ VOS_STATUS hdd_wlan_shutdown(void)
    pVosSchedContext vosSchedContext = NULL;
 
    hddLog(VOS_TRACE_LEVEL_FATAL, "%s: WLAN driver shutting down! ",__func__);
-
-#ifdef WLAN_FEATURE_LPSS
-   wlan_hdd_send_status_pkg(NULL, NULL, 0, 0);
-#endif
 
    /* If SSR never completes, then do kernel panic. */
    hdd_ssr_timer_init();
@@ -1856,28 +2111,42 @@ VOS_STATUS hdd_wlan_shutdown(void)
    }
 
    pHddCtx->isLogpInProgress = TRUE;
+   pHddCtx->isWiphySuspended = FALSE;
+   pHddCtx->isSchedScanUpdatePending = FALSE;
+
    vos_set_logp_in_progress(VOS_MODULE_ID_VOSS, TRUE);
 
    vos_clear_concurrent_session_count();
+
+   hddLog(VOS_TRACE_LEVEL_INFO,
+           FL("Invoking packetdump deregistration API"));
+   wlan_deregister_txrx_packetdump();
 
    if (VOS_TIMER_STATE_RUNNING ==
             vos_timer_getCurrentState(&pHddCtx->tdls_source_timer))
       vos_timer_stop(&pHddCtx->tdls_source_timer);
 
-#if defined(MSM_PLATFORM) || defined(LSI_PLATFORM)
+   hdd_abort_mac_scan_all_adapters(pHddCtx);
+
+#ifdef FEATURE_BUS_BANDWIDTH
    if (VOS_TIMER_STATE_RUNNING ==
            vos_timer_getCurrentState(&pHddCtx->bus_bw_timer))
    {
       vos_timer_stop(&pHddCtx->bus_bw_timer);
-   }
-#endif /* MSM_PLATFORM || LSI_PLATFORM */
+      hdd_rst_tcp_delack(pHddCtx);
 
-   hdd_reset_all_adapters(pHddCtx);
+      if (pHddCtx->hbw_requested) {
+          vos_remove_pm_qos();
+          pHddCtx->hbw_requested = false;
+      }
+   }
+#endif
 
 #ifdef IPA_UC_OFFLOAD
    hdd_ipa_uc_ssr_deinit();
 #endif
 
+   hdd_reset_all_adapters(pHddCtx);
    vosStatus = hddDevTmUnregisterNotifyCallback(pHddCtx);
    if ( !VOS_IS_STATUS_SUCCESS( vosStatus ) )
    {
@@ -1898,14 +2167,6 @@ VOS_STATUS hdd_wlan_shutdown(void)
       complete(&vosSchedContext->ResumeMcEvent);
       pHddCtx->isMcThreadSuspended= FALSE;
    }
-   if(TRUE == pHddCtx->isTxThreadSuspended){
-      complete(&vosSchedContext->ResumeTxEvent);
-      pHddCtx->isTxThreadSuspended= FALSE;
-   }
-   if(TRUE == pHddCtx->isRxThreadSuspended){
-      complete(&vosSchedContext->ResumeRxEvent);
-      pHddCtx->isRxThreadSuspended= FALSE;
-   }
 #ifdef QCA_CONFIG_SMP
    if (TRUE == pHddCtx->isTlshimRxThreadSuspended) {
       complete(&vosSchedContext->ResumeTlshimRxEvent);
@@ -1916,50 +2177,7 @@ VOS_STATUS hdd_wlan_shutdown(void)
    /* Reset the Suspend Variable */
    pHddCtx->isWlanSuspended = FALSE;
 
-   /* Stop all the threads; we do not want any messages to be a processed,
-    * any more and the best way to ensure that is to terminate the threads
-    * gracefully.
-    */
-   /* Wait for MC to exit */
-   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Shutting down MC thread",__func__);
-   set_bit(MC_SHUTDOWN_EVENT_MASK, &vosSchedContext->mcEventFlag);
-   set_bit(MC_POST_EVENT_MASK, &vosSchedContext->mcEventFlag);
-   wake_up_interruptible(&vosSchedContext->mcWaitQueue);
-   wait_for_completion(&vosSchedContext->McShutdown);
-
-   /* Wait for TX to exit */
-   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Shutting down TX thread",__func__);
-   set_bit(TX_SHUTDOWN_EVENT_MASK, &vosSchedContext->txEventFlag);
-   set_bit(TX_POST_EVENT_MASK, &vosSchedContext->txEventFlag);
-   wake_up_interruptible(&vosSchedContext->txWaitQueue);
-   wait_for_completion(&vosSchedContext->TxShutdown);
-
-   /* Wait for RX to exit */
-   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Shutting down RX thread",__func__);
-   set_bit(RX_SHUTDOWN_EVENT_MASK, &vosSchedContext->rxEventFlag);
-   set_bit(RX_POST_EVENT_MASK, &vosSchedContext->rxEventFlag);
-   wake_up_interruptible(&vosSchedContext->rxWaitQueue);
-   wait_for_completion(&vosSchedContext->RxShutdown);
-
-#ifdef QCA_CONFIG_SMP
-   /* Wait for TLshim RX to exit */
-   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Shutting down TLshim RX thread",
-          __func__);
-   unregister_hotcpu_notifier(vosSchedContext->cpuHotPlugNotifier);
-   set_bit(RX_SHUTDOWN_EVENT_MASK, &vosSchedContext->tlshimRxEvtFlg);
-   set_bit(RX_POST_EVENT_MASK, &vosSchedContext->tlshimRxEvtFlg);
-   wake_up_interruptible(&vosSchedContext->tlshimRxWaitQueue);
-   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Waiting for TLshim RX thread to exit",
-          __func__);
-   wait_for_completion(&vosSchedContext->TlshimRxShutdown);
-   vosSchedContext->TlshimRxThread = NULL;
-   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Waiting for dropping RX packets",
-          __func__);
-   vos_drop_rxpkt_by_staid(vosSchedContext, WLAN_MAX_STA_COUNT);
-   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Waiting for freeing freeQ", __func__);
-   vos_free_tlshim_pkt_freeq(vosSchedContext);
-#endif
-
+   tl_shim_flush_cache_rx_queue();
 
    hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Doing WDA STOP", __func__);
    vosStatus = WDA_stop(pVosContext, HAL_STOP_TYPE_RF_KILL);
@@ -2006,18 +2224,11 @@ VOS_STATUS hdd_wlan_shutdown(void)
 
    hdd_unregister_mcast_bcast_filter(pHddCtx);
 
-   hddLog(VOS_TRACE_LEVEL_INFO, "%s: Flush Queues",__func__);
-   /* Clean up message queues of TX, RX and MC thread */
-   vos_sched_flush_mc_mqs(vosSchedContext);
-   vos_sched_flush_tx_mqs(vosSchedContext);
-   vos_sched_flush_rx_mqs(vosSchedContext);
+   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Doing VOS SCHED Close", __func__);
+   vos_sched_close(vosSchedContext);
 
-   /* Deinit all the TX, RX and MC queues */
-   vos_sched_deinit_mqs(vosSchedContext);
-
-   hddLog(VOS_TRACE_LEVEL_INFO, "%s: Doing VOS Shutdown",__func__);
-   /* shutdown VOSS */
-   vos_shutdown(pVosContext);
+   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Doing VOS Close", __func__);
+   vos_close(pVosContext);
 
    /*mac context has already been released in mac_close call
      so setting it to NULL in hdd context*/
@@ -2029,16 +2240,68 @@ VOS_STATUS hdd_wlan_shutdown(void)
                                            __func__);
    }
 
-#ifdef CONFIG_SEC
-   hdd_send_hang_reason(pHddCtx);
-#endif /* CONFIG_SEC */
+#ifdef WLAN_FEATURE_LPSS
+   wlan_hdd_send_status_pkg(NULL, NULL, 0, 0);
+#endif
 
+   hdd_wlan_ssr_shutdown_event();
    hddLog(VOS_TRACE_LEVEL_FATAL, "%s: WLAN driver shutdown complete"
                                    ,__func__);
    return VOS_STATUS_SUCCESS;
 }
 
+/**
+ * hdd_ssr_restart_sap() - restart sap on SSR
+ * @hdd_ctx:   hdd context
+ *
+ * Return:     nothing
+ */
+static void hdd_ssr_restart_sap(hdd_context_t *hdd_ctx)
+{
+	VOS_STATUS       status;
+	hdd_adapter_list_node_t *adapter_node = NULL, *next = NULL;
+	hdd_adapter_t *adapter;
 
+	ENTER();
+
+	status =  hdd_get_front_adapter (hdd_ctx, &adapter_node);
+	while (NULL != adapter_node && VOS_STATUS_SUCCESS == status) {
+		adapter = adapter_node->pAdapter;
+		if (adapter && adapter->device_mode == WLAN_HDD_SOFTAP) {
+			if (test_bit(SOFTAP_INIT_DONE, &adapter->event_flags)) {
+				hddLog(VOS_TRACE_LEVEL_INFO, FL("Restart prev SAP session"));
+				wlan_hdd_start_sap(adapter, true);
+			}
+		}
+		status = hdd_get_next_adapter ( hdd_ctx, adapter_node, &next );
+		adapter_node = next;
+	}
+
+	EXIT();
+}
+
+#ifdef FEATURE_WLAN_DIAG_SUPPORT
+/**
+ * hdd_wlan_ssr_reinit_event - Send ssr reinit status
+ *
+ * This function sends ssr reinit status diag event
+ *
+ * Return: void.
+ */
+static void hdd_wlan_ssr_reinit_event(void)
+{
+	WLAN_VOS_DIAG_EVENT_DEF(ssr_reinit, struct host_event_wlan_ssr_reinit);
+	vos_mem_zero(&ssr_reinit, sizeof(ssr_reinit));
+	ssr_reinit.status = SSR_SUB_SYSTEM_REINIT;
+	WLAN_VOS_DIAG_EVENT_REPORT(&ssr_reinit,
+					EVENT_WLAN_SSR_REINIT_SUBSYSTEM);
+}
+#else
+static void hdd_wlan_ssr_reinit_event(void)
+{
+
+};
+#endif
 
 /* the HDD interface to WLAN driver re-init.
  * This is called to initialize/start WLAN driver after a shutdown.
@@ -2049,7 +2312,7 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
    v_CONTEXT_t      pVosContext = NULL;
    hdd_context_t    *pHddCtx = NULL;
    eHalStatus       halStatus;
-
+   bool             bug_on_reinit_failure = 0;
    hdd_adapter_t *pAdapter;
    int i;
    hdd_prevent_suspend(WIFI_POWER_EVENT_WAKELOCK_DRIVER_REINIT);
@@ -2072,16 +2335,22 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
       hddLog(VOS_TRACE_LEVEL_FATAL, "%s: HDD context is Null", __func__);
       goto err_re_init;
    }
+   bug_on_reinit_failure = pHddCtx->cfg_ini->bug_on_reinit_failure;
 
    if (!hif_sc) {
       hddLog(VOS_TRACE_LEVEL_FATAL, "%s: hif_sc is NULL", __func__);
       goto err_re_init;
    }
 
-   ((VosContextType*)pVosContext)->pHIFContext = hif_sc;
+   vosStatus = vos_set_context(VOS_MODULE_ID_HIF, hif_sc);
+   if (!VOS_IS_STATUS_SUCCESS(vosStatus)) {
+      hddLog(VOS_TRACE_LEVEL_FATAL, "%s: failed to set hif context", __func__);
+      goto err_re_init;
+   }
 
    /* The driver should always be initialized in STA mode after SSR */
-   hdd_set_conparam(0);
+   if (VOS_STA_SAP_MODE != hdd_get_conparam())
+       hdd_set_conparam(0);
 
    /* Re-open VOSS, it is a re-open b'se control transport was never closed. */
    vosStatus = vos_open(&pVosContext, 0);
@@ -2091,10 +2360,8 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
       goto err_re_init;
    }
 
-#if  !defined(REMOVE_PKT_LOG)
-      hif_init_pdev_txrx_handle(hif_sc,
-      vos_get_context(VOS_MODULE_ID_TXRX, pVosContext));
-#endif
+   hif_init_pdev_txrx_handle(hif_sc,
+         vos_get_context(VOS_MODULE_ID_TXRX, pVosContext));
 
    /* Save the hal context in Adapter */
    pHddCtx->hHal = (tHalHandle)vos_get_context( VOS_MODULE_ID_SME, pVosContext );
@@ -2118,6 +2385,8 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
       hddLog(VOS_TRACE_LEVEL_FATAL,"%s: vos_preStart failed",__func__);
       goto err_vosclose;
    }
+
+   hdd_set_dfs_regdomain(pHddCtx,true);
 
    vosStatus = hdd_set_sme_chan_list(pHddCtx);
    if (!VOS_IS_STATUS_SUCCESS(vosStatus)) {
@@ -2148,6 +2417,15 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
       goto err_vosclose;
    }
 
+   /*
+    * Invoke ipa reinit before vos_start so that doorbell registers are
+    * updated
+    */
+#ifdef IPA_UC_OFFLOAD
+   if (hdd_ipa_uc_ssr_reinit(pHddCtx))
+      hddLog(LOGE, "%s: HDD IPA UC reinit failed", __func__);
+#endif
+
    /* Start VOSS which starts up the SME/MAC/HAL modules and everything else
       Note: Firmware image will be read and downloaded inside vos_start API */
    vosStatus = vos_start( pVosContext );
@@ -2156,11 +2434,6 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
       hddLog(VOS_TRACE_LEVEL_FATAL,"%s: vos_start failed",__func__);
       goto err_vosclose;
    }
-#ifdef IPA_UC_OFFLOAD
-   if (hdd_ipa_uc_ssr_reinit())
-      hddLog(LOGE, "%s: HDD IPA UC reinit failed", __func__);
-#endif
-
 
    vosStatus = hdd_post_voss_start_config( pHddCtx );
    if ( !VOS_IS_STATUS_SUCCESS( vosStatus ) )
@@ -2190,6 +2463,8 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
    /* Pass FW version to HIF layer */
    hif_set_fw_info(hif_sc, pHddCtx->target_fw_version);
 
+   wlan_hdd_send_svc_nlink_msg(pHddCtx->radio_index,
+                               WLAN_SVC_FW_CRASHED_IND, NULL, 0);
 
    /* Restart all adapters */
    hdd_start_all_adapters(pHddCtx);
@@ -2233,12 +2508,16 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
    /* Register TM level change handler function to the platform */
    hddDevTmRegisterNotifyCallback(pHddCtx);
 
+   pHddCtx->last_scan_reject_session_id = 0xFF;
+   pHddCtx->last_scan_reject_reason = 0;
+   pHddCtx->last_scan_reject_timestamp = 0;
+   pHddCtx->scan_reject_cnt = 0;
+
    pHddCtx->hdd_mcastbcast_filter_set = FALSE;
    pHddCtx->btCoexModeSet = false;
    hdd_register_mcast_bcast_filter(pHddCtx);
-   hdd_ssr_timer_del();
 
-   wlan_hdd_send_svc_nlink_msg(WLAN_SVC_FW_CRASHED_IND, NULL, 0);
+   wlan_hdd_process_tdcc_ps(NULL, PS_TDCC_RESET, NULL, NULL);
 
    /* Allow the phone to go to sleep */
    hdd_allow_suspend(WIFI_POWER_EVENT_WAKELOCK_DRIVER_REINIT);
@@ -2250,11 +2529,19 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
       goto err_unregister_pmops;
    }
    vos_set_reinit_in_progress(VOS_MODULE_ID_VOSS, FALSE);
+
+   sme_register_mgmt_frame_ind_callback(pHddCtx->hHal, hdd_indicate_mgmt_frame);
+
+   /* Register for p2p ack indication */
+   sme_register_p2p_ack_ind_callback(pHddCtx->hHal, hdd_send_action_cnf_cb);
+
 #ifdef FEATURE_WLAN_EXTSCAN
    sme_ExtScanRegisterCallback(pHddCtx->hHal,
                                wlan_hdd_cfg80211_extscan_callback);
 #endif /* FEATURE_WLAN_EXTSCAN */
    sme_set_rssi_threshold_breached_cb(pHddCtx->hHal, hdd_rssi_threshold_breached);
+   wlan_hdd_cfg80211_link_layer_stats_init(pHddCtx);
+   sme_bpf_offload_register_callback(pHddCtx->hHal, hdd_get_bpf_offload_cb);
 
 #ifdef WLAN_FEATURE_LPSS
    wlan_hdd_send_all_scan_intf_info(pHddCtx);
@@ -2262,6 +2549,10 @@ VOS_STATUS hdd_wlan_re_init(void *hif_sc)
                              pHddCtx->target_hw_version,
                              pHddCtx->target_hw_name);
 #endif
+   /* set chip power save failure detected callback */
+   sme_set_chip_pwr_save_fail_cb(pHddCtx->hHal,
+                                 hdd_chip_pwr_save_fail_detected_cb);
+
    ol_pktlog_init(hif_sc);
    goto success;
 
@@ -2269,8 +2560,6 @@ err_unregister_pmops:
 #ifdef CONFIG_HAS_EARLYSUSPEND
    hdd_unregister_mcast_bcast_filter(pHddCtx);
 #endif
-   hdd_close_all_adapters(pHddCtx);
-
 
 err_vosstop:
    vos_stop(pVosContext);
@@ -2278,42 +2567,41 @@ err_vosstop:
 err_vosclose:
    vos_close(pVosContext);
    vos_sched_close(pVosContext);
-   if (pHddCtx)
-   {
-       /* Unregister the Net Device Notifier */
-       unregister_netdevice_notifier(&hdd_netdev_notifier);
-       /* Clean up HDD Nlink Service */
-       send_btc_nlink_msg(WLAN_MODULE_DOWN_IND, 0);
-#ifdef WLAN_KD_READY_NOTIFIER
-       cnss_diag_notify_wlan_close();
-       nl_srv_exit(pHddCtx->ptt_pid);
-#else
-       nl_srv_exit();
-#endif /* WLAN_KD_READY_NOTIFIER */
-       /* Free up dynamically allocated members inside HDD Adapter */
-       kfree(pHddCtx->cfg_ini);
-       pHddCtx->cfg_ini= NULL;
-
-       wiphy_unregister(pHddCtx->wiphy);
-       wlan_hdd_cfg80211_deinit(pHddCtx->wiphy);
-       wiphy_free(pHddCtx->wiphy);
-   }
-   vos_preClose(&pVosContext);
 
 #ifdef MEMORY_DEBUG
+   adf_net_buf_debug_exit();
+   adf_nbuf_map_check_for_leaks();
    vos_mem_exit();
 #endif
 
 err_re_init:
-   /* Allow the phone to go to sleep */
-   hdd_allow_suspend(WIFI_POWER_EVENT_WAKELOCK_DRIVER_REINIT);
-   vos_set_reinit_in_progress(VOS_MODULE_ID_VOSS, FALSE);
-   VOS_BUG(0);
+   if (bug_on_reinit_failure)
+      VOS_BUG(0);
+   else {
+      hddLog(VOS_TRACE_LEVEL_ERROR, "SSR fails during reinit");
+      vos_set_reinit_in_progress(VOS_MODULE_ID_VOSS, FALSE);
+      hdd_allow_suspend(WIFI_POWER_EVENT_WAKELOCK_DRIVER_REINIT);
+      hdd_wlan_wakelock_destroy();
+      vos_set_context(VOS_MODULE_ID_HIF, NULL);
+   }
    return -EPERM;
-
 success:
-   /* Trigger replay of BTC events */
-   send_btc_nlink_msg(WLAN_MODULE_DOWN_IND, 0);
+   hdd_wlan_ssr_reinit_event();
+   if (pHddCtx->cfg_ini->sap_internal_restart)
+       hdd_ssr_restart_sap(pHddCtx);
    pHddCtx->isLogpInProgress = FALSE;
+   hdd_ssr_timer_del();
    return VOS_STATUS_SUCCESS;
+}
+
+void hdd_wlan_cleanup(void)
+{
+	ENTER();
+
+	/* Stop SSR timer */
+	hdd_ssr_timer_del();
+	vos_set_logp_in_progress(VOS_MODULE_ID_VOSS, FALSE);
+
+	__hdd_wlan_exit();
+	EXIT();
 }

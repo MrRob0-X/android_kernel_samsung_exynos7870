@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2010, 2013-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2004-2010, 2013-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -56,6 +56,20 @@
 #define CONFIG_160MHZ_SUPPORT 0 /* default: 160 MHz channels not supported */
 #endif
 
+#ifndef SUPPORT_11AX
+#define SUPPORT_11AX 0 /* 11ax not supported by default */
+#endif
+
+/* defines to set Packet extension values which can be 0 us, 8 us or 16 us */
+/* NOTE: Below values cannot be changed without breaking WMI Compatibility */
+#define MAX_HE_NSS               8
+#define MAX_HE_MODULATION        8
+#define MAX_HE_RU                4
+#define HE_MODULATION_NONE       7
+#define HE_PET_0_USEC            0
+#define HE_PET_8_USEC            1
+#define HE_PET_16_USEC           2
+
 typedef enum {
     MODE_11A        = 0,   /* 11a Mode */
     MODE_11G        = 1,   /* 11b/g Mode */
@@ -76,9 +90,28 @@ typedef enum {
     MODE_11AC_VHT160   = 15,
 #endif
 
+#if SUPPORT_11AX
+    MODE_11AX_HE20 = 16,
+    MODE_11AX_HE40 = 17,
+    MODE_11AX_HE80 = 18,
+    MODE_11AX_HE80_80 = 19,
+    MODE_11AX_HE160 = 20,
+    MODE_11AX_HE20_2G = 21,
+    MODE_11AX_HE40_2G = 22,
+    MODE_11AX_HE80_2G = 23,
+#endif
+
+    /*
+     * MODE_UNKNOWN should not be used within the host / target interface.
+     * Thus, it is permissible for ODE_UNKNOWN to be conditionally-defined,
+     * taking different values when compiling for different targets.
+     */
+
     MODE_UNKNOWN,
-    MODE_UNKNOWN_NO_160MHZ_SUPPORT = 14,
-    MODE_UNKNOWN_160MHZ_SUPPORT = 16,
+    MODE_UNKNOWN_NO_160MHZ_SUPPORT = 14, /* not needed? */
+    //MODE_UNKNOWN_NO_11AX_SUPPORT = 16, /* not needed? */
+    //MODE_UNKNOWN_11AX_SUPPORT = 24, /* not needed? */
+    MODE_UNKNOWN_160MHZ_SUPPORT = MODE_UNKNOWN, /* not needed? */
 
     MODE_MAX        = MODE_UNKNOWN,
     MODE_MAX_NO_160_MHZ_SUPPORT = MODE_UNKNOWN_NO_160MHZ_SUPPORT,
@@ -110,6 +143,10 @@ typedef enum {
     WLAN_11AG_CAPABILITY  = 3,
 }WLAN_CAPABILITY;
 
+#define SUB20_MODE_NONE (0x00)
+#define SUB20_MODE_5MHZ (0x01)
+#define SUB20_MODE_10MHZ (0x02)
+
 #if defined(CONFIG_AR900B_SUPPORT) || defined(AR900B)
 #define A_RATEMASK A_UINT64
 #else
@@ -132,6 +169,15 @@ typedef enum {
         ((mode) == MODE_11AC_VHT80))
 #endif
 
+#define IS_MODE_HE(mode) (((mode) == MODE_11AX_HE20) || \
+        ((mode) == MODE_11AX_HE40)     || \
+        ((mode) == MODE_11AX_HE80)     || \
+        ((mode) == MODE_11AX_HE80_80)  || \
+        ((mode) == MODE_11AX_HE160)    || \
+        ((mode) == MODE_11AX_HE20_2G)  || \
+        ((mode) == MODE_11AX_HE40_2G)  || \
+        ((mode) == MODE_11AX_HE80_2G))
+
 #define IS_MODE_VHT_2G(mode) (((mode) == MODE_11AC_VHT20_2G) || \
         ((mode) == MODE_11AC_VHT40_2G) || \
         ((mode) == MODE_11AC_VHT80_2G))
@@ -152,6 +198,40 @@ typedef enum {
                                  ((mode) == MODE_11NG_HT40))
 #define IS_MODE_11GONLY(mode)   ((mode) == MODE_11GONLY)
 
+#define IS_MODE_LEGACY(phymode)  ((phymode == MODE_11A) || \
+                                  (phymode == MODE_11G) || \
+                                  (phymode == MODE_11B) || \
+                                  (phymode == MODE_11GONLY))
+
+#define IS_MODE_11N(phymode)     ((phymode >= MODE_11NA_HT20) && \
+                                  (phymode <= MODE_11NG_HT40))
+#ifdef CONFIG_160MHZ_SUPPORT
+  #define IS_MODE_11AC(phymode)  ((phymode >= MODE_11AC_VHT20) && \
+                                  (phymode <= MODE_11AC_VHT160))
+#else
+  #define IS_MODE_11AC(phymode)  ((phymode >= MODE_11AC_VHT20) && \
+                                  (phymode <= MODE_11AC_VHT80_2G))
+#endif /* CONFIG_160MHZ_SUPPORT */
+
+#if SUPPORT_11AX
+  #define IS_MODE_80MHZ(phymode) ((phymode == MODE_11AC_VHT80_2G) || \
+                                  (phymode == MODE_11AC_VHT80) || \
+                                  (phymode == MODE_11AX_HE80) || \
+                                  (phymode == MODE_11AX_HE80_2G))
+  #define IS_MODE_40MHZ(phymode) ((phymode == MODE_11AC_VHT40_2G) || \
+                                  (phymode == MODE_11AC_VHT40) || \
+                                  (phymode == MODE_11NG_HT40) || \
+                                  (phymode == MODE_11NA_HT40) || \
+                                  (phymode == MODE_11AX_HE40) || \
+                                  (phymode == MODE_11AX_HE40_2G))
+#else
+  #define IS_MODE_80MHZ(phymode) ((phymode == MODE_11AC_VHT80_2G) || \
+                                  (phymode == MODE_11AC_VHT80))
+  #define IS_MODE_40MHZ(phymode) ((phymode == MODE_11AC_VHT40_2G) || \
+                                  (phymode == MODE_11AC_VHT40) || \
+                                  (phymode == MODE_11NG_HT40) || \
+                                  (phymode == MODE_11NA_HT40))
+#endif /* SUPPORT_11AX */
 
 enum {
     REGDMN_MODE_11A              = 0x00000001,  /* 11a channels */
@@ -178,6 +258,9 @@ enum {
     REGDMN_MODE_11AC_VHT40_2G    = 0x000400000, /* 2Ghz, VHT40 */
     REGDMN_MODE_11AC_VHT80_2G    = 0x000800000, /* 2Ghz, VHT80 */
     REGDMN_MODE_11AC_VHT160      = 0x001000000, /* 5Ghz, VHT160 */
+    REGDMN_MODE_11AC_VHT40_2GPLUS  = 0x002000000, /* 2Ghz, VHT40+ */
+    REGDMN_MODE_11AC_VHT40_2GMINUS = 0x004000000, /* 2Ghz, VHT40- */
+    REGDMN_MODE_11AC_VHT80_80      = 0x008000000, /* 5GHz, VHT80+80 */
 };
 
 #define REGDMN_MODE_ALL       (0xFFFFFFFF)       /* REGDMN_MODE_ALL is defined out of the enum
@@ -273,8 +356,20 @@ typedef struct {
         (_dst).flags           |= (_f);                                 \
     } while (0)
 
-/* NOTE: NUM_DYN_BW and NUM_SCHED_ENTRIES cannot be changed without breaking WMI Compatibility */
+/*
+ * NOTE: NUM_SCHED_ENTRIES is not used in the host/target interface, but for
+ * historical reasons has been defined in the host/target interface files.
+ * The NUM_SCHED_ENTRIES definition is being moved into a target-only
+ * header file for newer (Lithium) targets, but is being left here for
+ * non-Lithium cases, to avoid having to rework legacy targets to move
+ * the NUM_SCHED_ENTRIES definition into a target-only header file.
+ * Moving the NUM_SCHED_ENTRIES definition into a non-Lithium conditional
+ * block should have no impact on the host, since the host does not use
+ * NUM_SCHED_ENTRIES.
+ */
 #define NUM_SCHED_ENTRIES           2
+
+/* NOTE: NUM_DYN_BW cannot be changed without breaking WMI Compatibility */
 #define NUM_DYN_BW_MAX              4
 
 /* Some products only use 20/40/80; some use 20/40/80/160 */
@@ -320,6 +415,7 @@ typedef struct{
     A_RATE      probe_rix;
     A_UINT8     num_valid_rates;
     A_UINT8     rtscts_tpc;
+    A_UINT8     dd_profile;
 } RC_TX_RATE_SCHEDULE;
 
 #else
@@ -391,10 +487,20 @@ typedef struct {
    A_UINT32 ptr;
    /** size of the chunk */
    A_UINT32 size;
+    /** ptr_high
+     * most significant bits of physical address of the memory chunk
+     * Only applicable for addressing more than 32 bit.
+     * This will only be non-zero if the target has set
+     * WMI_SERVICE_SUPPORT_EXTEND_ADDRESS flag.
+     */
+   A_UINT32 ptr_high;
 } wlan_host_memory_chunk;
 
-#define NUM_UNITS_IS_NUM_VDEVS   0x1
-#define NUM_UNITS_IS_NUM_PEERS   0x2
+#define NUM_UNITS_IS_NUM_VDEVS        0x1
+#define NUM_UNITS_IS_NUM_PEERS        0x2
+#define NUM_UNITS_IS_NUM_ACTIVE_PEERS 0x4
+/* request host to allocate memory contiguously */
+#define REQ_TO_HOST_FOR_CONT_MEMORY   0x8
 
 /**
  * structure used by FW for requesting host memory
@@ -460,7 +566,12 @@ typedef enum {
  * so that it is easy to handle the statistics in BE host.
  */
 
-struct wlan_dbg_tx_stats {
+/*
+ * wlan_dbg_tx_stats_v1, _v2:
+ * differing versions of the wlan_dbg_tx_stats struct used by different
+ * targets
+ */
+struct wlan_dbg_tx_stats_v1 {
     /* Num HTT cookies queued to dispatch list */
     A_INT32 comp_queued;
     /* Num HTT cookies dispatched */
@@ -481,19 +592,12 @@ struct wlan_dbg_tx_stats {
     A_INT32 hw_reaped;
     /* Num underruns */
     A_INT32 underrun;
-#if defined(AR900B)
-    /* HW Paused. */
-    A_UINT32 hw_paused;
-#endif
     /* Num PPDUs cleaned up in TX abort */
     A_INT32 tx_abort;
     /* Num MPDUs requed by SW */
     A_INT32 mpdus_requed;
     /* excessive retries */
     A_UINT32 tx_ko;
-#if defined(AR900B)
-    A_UINT32 tx_xretry;
-#endif
     /* data hw rate code */
     A_UINT32 data_rc;
     /* Scheduler self triggers */
@@ -514,7 +618,58 @@ struct wlan_dbg_tx_stats {
     A_UINT32 phy_underrun;
     /* MPDU is more than txop limit */
     A_UINT32 txop_ovf;
-#if defined(AR900B)
+};
+
+struct wlan_dbg_tx_stats_v2 {
+    /* Num HTT cookies queued to dispatch list */
+    A_INT32 comp_queued;
+    /* Num HTT cookies dispatched */
+    A_INT32 comp_delivered;
+    /* Num MSDU queued to WAL */
+    A_INT32 msdu_enqued;
+    /* Num MPDU queue to WAL */
+    A_INT32 mpdu_enqued;
+    /* Num MSDUs dropped by WMM limit */
+    A_INT32 wmm_drop;
+    /* Num Local frames queued */
+    A_INT32 local_enqued;
+    /* Num Local frames done */
+    A_INT32 local_freed;
+    /* Num queued to HW */
+    A_INT32 hw_queued;
+    /* Num PPDU reaped from HW */
+    A_INT32 hw_reaped;
+    /* Num underruns */
+    A_INT32 underrun;
+    /* HW Paused. */
+    A_UINT32 hw_paused;
+    /* Num PPDUs cleaned up in TX abort */
+    A_INT32 tx_abort;
+    /* Num MPDUs requed by SW */
+    A_INT32 mpdus_requed;
+    /* excessive retries */
+    A_UINT32 tx_ko;
+    A_UINT32 tx_xretry;
+    /* data hw rate code */
+    A_UINT32 data_rc;
+    /* Scheduler self triggers */
+    A_UINT32 self_triggers;
+    /* frames dropped due to excessive sw retries */
+    A_UINT32 sw_retry_failure;
+    /* illegal rate phy errors  */
+    A_UINT32 illgl_rate_phy_err;
+    /* wal pdev continous xretry */
+    A_UINT32 pdev_cont_xretry;
+    /* wal pdev continous xretry */
+    A_UINT32 pdev_tx_timeout;
+    /* wal pdev resets  */
+    A_UINT32 pdev_resets;
+    /* frames dropped due to non-availability of stateless TIDs */
+    A_UINT32 stateless_tid_alloc_failure;
+    /* PhY/BB underrun */
+    A_UINT32 phy_underrun;
+    /* MPDU is more than txop limit */
+    A_UINT32 txop_ovf;
     /* Number of Sequences posted */
     A_UINT32 seq_posted;
     /* Number of Sequences failed queueing */
@@ -535,12 +690,20 @@ struct wlan_dbg_tx_stats {
     A_INT32 mpdus_ack_failed;
     /* Num MPDUs that was dropped du to expiry. */
     A_INT32 mpdus_expired;
-    /* Num mc drops */
-    //A_UINT32 mc_drop;
-#endif
 };
 
-struct wlan_dbg_rx_stats {
+#if defined(AR900B)
+#define wlan_dbg_tx_stats wlan_dbg_tx_stats_v2
+#else
+#define wlan_dbg_tx_stats wlan_dbg_tx_stats_v1
+#endif
+
+/*
+ * wlan_dbg_rx_stats_v1, _v2:
+ * differing versions of the wlan_dbg_rx_stats struct used by different
+ * targets
+ */
+struct wlan_dbg_rx_stats_v1 {
     /* Cnts any change in ring routing mid-ppdu */
     A_INT32 mid_ppdu_route_change;
     /* Total number of statuses processed */
@@ -564,12 +727,41 @@ struct wlan_dbg_rx_stats {
     A_INT32 phy_err_drop;
     /* Number of mpdu errors - FCS, MIC, ENC etc. */
     A_INT32 mpdu_errs;
-#if defined(AR900B)
-    /* Number of rx overflow errors. */
-    A_INT32 rx_ovfl_errs;
-#endif
 };
 
+struct wlan_dbg_rx_stats_v2 {
+    /* Cnts any change in ring routing mid-ppdu */
+    A_INT32 mid_ppdu_route_change;
+    /* Total number of statuses processed */
+    A_INT32 status_rcvd;
+    /* Extra frags on rings 0-3 */
+    A_INT32 r0_frags;
+    A_INT32 r1_frags;
+    A_INT32 r2_frags;
+    A_INT32 r3_frags;
+    /* MSDUs / MPDUs delivered to HTT */
+    A_INT32 htt_msdus;
+    A_INT32 htt_mpdus;
+    /* MSDUs / MPDUs delivered to local stack */
+    A_INT32 loc_msdus;
+    A_INT32 loc_mpdus;
+    /* AMSDUs that have more MSDUs than the status ring size */
+    A_INT32 oversize_amsdu;
+    /* Number of PHY errors */
+    A_INT32 phy_errs;
+    /* Number of PHY errors drops */
+    A_INT32 phy_err_drop;
+    /* Number of mpdu errors - FCS, MIC, ENC etc. */
+    A_INT32 mpdu_errs;
+    /* Number of rx overflow errors. */
+    A_INT32 rx_ovfl_errs;
+};
+
+#if defined(AR900B)
+#define wlan_dbg_rx_stats wlan_dbg_rx_stats_v2
+#else
+#define wlan_dbg_rx_stats wlan_dbg_rx_stats_v1
+#endif
 
 struct wlan_dbg_mem_stats {
     A_UINT32 iram_free_size;
@@ -580,6 +772,28 @@ struct wlan_dbg_peer_stats {
 
 	A_INT32 dummy; /* REMOVE THIS ONCE REAL PEER STAT COUNTERS ARE ADDED */
 };
+
+/*
+ * wlan_dbg_rx_rate_info_v1a_t, _v1b_t:
+ * differing versions of the wlan_dbg_rx_rate_info struct used by different
+ * targets
+ */
+typedef struct {
+    A_UINT32 mcs[10];
+    A_UINT32 sgi[10];
+    A_UINT32 nss[4];
+    A_UINT32 nsts;
+    A_UINT32 stbc[10];
+    A_UINT32 bw[3];
+    A_UINT32 pream[6];
+    A_UINT32 ldpc;
+    A_UINT32 txbf;
+    A_UINT32 mgmt_rssi;
+    A_UINT32 data_rssi;
+    A_UINT32 rssi_chain0;
+    A_UINT32 rssi_chain1;
+    A_UINT32 rssi_chain2;
+} wlan_dbg_rx_rate_info_v1a_t;
 
 typedef struct {
     A_UINT32 mcs[10];
@@ -599,12 +813,15 @@ typedef struct {
 /*
  * TEMPORARY: leave rssi_chain3 in place for AR900B builds until code using
  * rssi_chain3 has been converted to use wlan_dbg_rx_rate_info_v2_t.
- * At that time, this rssi_chain3 field will be deleted.
  */
-#if defined(AR900B)
     A_UINT32 rssi_chain3;
+} wlan_dbg_rx_rate_info_v1b_t;
+
+#if defined(AR900B)
+#define wlan_dbg_rx_rate_info_t wlan_dbg_rx_rate_info_v1b_t
+#else
+#define wlan_dbg_rx_rate_info_t wlan_dbg_rx_rate_info_v1a_t
 #endif
-} wlan_dbg_rx_rate_info_t ;
 
 typedef struct {
     A_UINT32 mcs[10];
@@ -664,7 +881,7 @@ typedef struct {
 #define WHAL_DBG_PHY_ERR_MAXCNT 18
 #define WHAL_DBG_SIFS_STATUS_MAXCNT 8
 #define WHAL_DBG_SIFS_ERR_MAXCNT 8
-#define WHAL_DBG_CMD_RESULT_MAXCNT 10
+#define WHAL_DBG_CMD_RESULT_MAXCNT 11
 #define WHAL_DBG_CMD_STALL_ERR_MAXCNT 4
 #define WHAL_DBG_FLUSH_REASON_MAXCNT 40
 
@@ -680,6 +897,7 @@ typedef struct wlan_dbg_txbf_snd_stats {
     A_UINT32 cbf_40[4];
     A_UINT32 cbf_80[4];
     A_UINT32 sounding[9];
+    A_UINT32 cbf_160[4];
 }wlan_dbg_txbf_snd_stats_t;
 
 typedef struct wlan_dbg_wifi2_error_stats {
@@ -762,24 +980,55 @@ typedef struct wlan_dbg_stats_wifi2 {
     wlan_dgb_sifs_resp_stats_t sifs_resp_info;
 } wlan_dbg_wifi2_stats_t;
 
+/*
+ * wlan_dbg_rx_rate_info_v1a, _v1b:
+ * differing versions of the wlan_dbg_rx_rate_info struct used by different
+ * targets
+ */
 typedef struct {
-    wlan_dbg_rx_rate_info_t rx_phy_info;
+    wlan_dbg_rx_rate_info_v1a_t rx_phy_info;
     wlan_dbg_tx_rate_info_t tx_rate_info;
-} wlan_dbg_rate_info_t;
+} wlan_dbg_rate_info_v1a_t;
+
+typedef struct {
+    wlan_dbg_rx_rate_info_v1b_t rx_phy_info;
+    wlan_dbg_tx_rate_info_t tx_rate_info;
+} wlan_dbg_rate_info_v1b_t;
+
+#if defined(AR900B)
+#define wlan_dbg_rate_info_t wlan_dbg_rate_info_v1b_t
+#else
+#define wlan_dbg_rate_info_t wlan_dbg_rate_info_v1a_t
+#endif
 
 typedef struct {
     wlan_dbg_rx_rate_info_v2_t rx_phy_info;
     wlan_dbg_tx_rate_info_v2_t tx_rate_info;
 } wlan_dbg_rate_info_v2_t;
 
-struct wlan_dbg_stats {
-    struct wlan_dbg_tx_stats tx;
-    struct wlan_dbg_rx_stats rx;
-#if defined(AR900B)
-    struct wlan_dbg_mem_stats mem;
-#endif
+/*
+ * wlan_dbg_stats_v1, _v2:
+ * differing versions of the wlan_dbg_stats struct used by different
+ * targets
+ */
+struct wlan_dbg_stats_v1 {
+    struct wlan_dbg_tx_stats_v1 tx;
+    struct wlan_dbg_rx_stats_v1 rx;
     struct wlan_dbg_peer_stats peer;
 };
+
+struct wlan_dbg_stats_v2 {
+    struct wlan_dbg_tx_stats_v2 tx;
+    struct wlan_dbg_rx_stats_v2 rx;
+    struct wlan_dbg_mem_stats mem;
+    struct wlan_dbg_peer_stats peer;
+};
+
+#if defined(AR900B)
+#define wlan_dbg_stats wlan_dbg_stats_v2
+#else
+#define wlan_dbg_stats wlan_dbg_stats_v1
+#endif
 
 #define DBG_STATS_MAX_HWQ_NUM 10
 #define DBG_STATS_MAX_TID_NUM 20
@@ -794,5 +1043,26 @@ struct wlan_dbg_tidq_stats{
     A_UINT32 wlan_dbg_tid_txq_status;
     struct wlan_dbg_txq_stats txq_st;
 };
+
+typedef enum {
+    WLAN_DBG_DATA_STALL_NONE = 0,
+    WLAN_DBG_DATA_STALL_VDEV_PAUSE,         /* 1 */
+    WLAN_DBG_DATA_STALL_HWSCHED_CMD_FILTER, /* 2 */
+    WLAN_DBG_DATA_STALL_HWSCHED_CMD_FLUSH,  /* 3 */
+    WLAN_DBG_DATA_STALL_RX_REFILL_FAILED,   /* 4 */
+    WLAN_DBG_DATA_STALL_RX_FCS_LEN_ERROR,   /* 5 */
+    WLAN_DBG_DATA_STALL_MAC_WDOG_ERRORS,    /* 6 */ /* Mac watch dog */
+    WLAN_DBG_DATA_STALL_PHY_BB_WDOG_ERROR,  /* 7 */ /* PHY watch dog */
+    WLAN_DBG_DATA_STALL_POST_TIM_NO_TXRX_ERROR, /* 8 */
+    WLAN_DBG_DATA_STALL_MAX,
+} wlan_dbg_data_stall_type_e;
+
+typedef enum {
+    WLAN_DBG_DATA_STALL_RECOVERY_NONE = 0,
+    WLAN_DBG_DATA_STALL_RECOVERY_CONNECT_DISCONNECT,
+    WLAN_DBG_DATA_STALL_RECOVERY_CONNECT_MAC_PHY_RESET,
+    WLAN_DBG_DATA_STALL_RECOVERY_CONNECT_PDR,
+    WLAN_DBG_DATA_STALL_RECOVERY_CONNECT_SSR,
+} wlan_dbg_data_stall_recovery_type_e;
 
 #endif /* __WLANDEFS_H__ */

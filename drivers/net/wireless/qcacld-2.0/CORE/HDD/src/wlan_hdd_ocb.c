@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -39,6 +39,7 @@
 #include "wlan_tgt_def_config.h"
 #include "schApi.h"
 #include "wma.h"
+#include "vos_types.h"
 #include "wlan_hdd_request_manager.h"
 
 /* Structure definitions for WLAN_SET_DOT11P_CHANNEL_SCHED */
@@ -113,7 +114,7 @@ static int dot11p_validate_qos_params(struct sir_qos_params qos_params[])
 
 #define DOT11P_TX_PWR_MAX	30
 #define DOT11P_TX_ANTENNA_MAX	6
-#define NUM_DOT11P_CHANNELS	10
+#define NUM_DOT11P_CHANNELS	ARRAY_SIZE(valid_dot11p_channels)
 /*
  * If FEATURE_STATICALLY_ADD_11P_CHANNELS
  * is defined, IEEE80211_CHAN_NO_10MHZ,
@@ -133,7 +134,7 @@ struct chan_info {
 	uint32_t max_bandwidth;
 };
 
-struct chan_info valid_dot11p_channels[NUM_DOT11P_CHANNELS] = {
+struct chan_info valid_dot11p_channels[] = {
 	{5860, 10},
 	{5870, 10},
 	{5880, 10},
@@ -143,7 +144,21 @@ struct chan_info valid_dot11p_channels[NUM_DOT11P_CHANNELS] = {
 	{5920, 10},
 	{5875, 20},
 	{5905, 20},
-	{5852, 5}
+	{5852, 5},
+	{5857, 5},
+	{5862, 5},
+	{5867, 5},
+	{5872, 5},
+	{5877, 5},
+	{5882, 5},
+	{5887, 5},
+	{5892, 5},
+	{5897, 5},
+	{5902, 5},
+	{5907, 5},
+	{5912, 5},
+	{5917, 5},
+	{5922, 5},
 };
 
 /**
@@ -191,28 +206,16 @@ static int dot11p_validate_channel_static_channels(struct wiphy *wiphy,
 
 	return -EINVAL;
 }
-#else
-/**
- * dot11p_validate_channel_static_channels() - validate a DSRC channel
- * @center_freq: the channel's center frequency
- * @bandwidth: the channel's bandwidth
- * @tx_power: transmit power
- * @reg_power: (output) the max tx power from the regulatory domain
- * @antenna_max: (output) the max antenna gain from the regulatory domain
- *
- * This function of the function checks the channel parameters against a
- * hardcoded list of valid channels based on the FCC rules.
- *
- * Return: 0 if the channel is valid, error code otherwise.
- */
-static int dot11p_validate_channel_static_channels(struct wiphy *wiphy,
-	uint32_t channel_freq, uint32_t bandwidth, uint32_t tx_power,
-	uint8_t *reg_power, uint8_t *antenna_max)
-{
-	return -EINVAL;
-}
-#endif /* FEATURE_STATICALLY_ADD_11P_CHANNELS */
 
+static int dot11p_validate_channel(struct wiphy *wiphy,
+				   uint32_t channel_freq, uint32_t bandwidth,
+				   uint32_t tx_power, uint8_t *reg_power,
+				   uint8_t *antenna_max)
+{
+	return dot11p_validate_channel_static_channels(wiphy, channel_freq,
+		bandwidth, tx_power, reg_power, antenna_max);
+}
+#else
 /**
  * dot11p_validate_channel() - validates a DSRC channel
  * @center_freq: the channel's center frequency
@@ -288,9 +291,9 @@ static int dot11p_validate_channel(struct wiphy *wiphy,
 		}
 	}
 
-	return dot11p_validate_channel_static_channels(wiphy, channel_freq,
-		bandwidth, tx_power, reg_power, antenna_max);
+	return -EINVAL;
 }
+#endif
 
 /**
  * hdd_ocb_validate_config() - Validates the config data
@@ -365,8 +368,6 @@ static int hdd_ocb_register_sta(hdd_adapter_t *adapter)
 
 	vos_status = WLANTL_RegisterSTAClient(hdd_ctx->pvosContext,
 					      hdd_rx_packet_cbk,
-					      hdd_tx_complete_cbk,
-					      hdd_tx_fetch_packet_cbk,
 					      &sta_desc,
 					      0);
 	if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
@@ -396,10 +397,11 @@ static int hdd_ocb_register_sta(hdd_adapter_t *adapter)
  *
  * Return: A pointer to the OCB configuration struct, NULL on failure.
  */
-static struct sir_ocb_config *hdd_ocb_config_new(int num_channels,
-						 int num_schedule,
-						 int ndl_chan_list_len,
-						 int ndl_active_state_list_len)
+static
+struct sir_ocb_config *hdd_ocb_config_new(uint32_t num_channels,
+					  uint32_t num_schedule,
+					  uint32_t ndl_chan_list_len,
+					  uint32_t ndl_active_state_list_len)
 {
 	struct sir_ocb_config *ret = 0;
 	size_t len;
@@ -507,8 +509,10 @@ static void hdd_ocb_set_config_callback(void *context_ptr, void *response_ptr)
 static int hdd_ocb_set_config_req(hdd_adapter_t *adapter,
 				  struct sir_ocb_config *config)
 {
-	int rc;
+	int i, rc;
 	eHalStatus halStatus;
+	bool enable_chan_stats;
+	struct dsrc_radio_chan_stats_ctxt *ctx;
 	void *cookie;
 	struct hdd_request *hdd_request;
 	struct hdd_ocb_set_config_priv *priv;
@@ -522,6 +526,23 @@ static int hdd_ocb_set_config_req(hdd_adapter_t *adapter,
 		return -EINVAL;
 	}
 
+	/*
+	 * Save OCB configured channel information for
+	 * DSRC Radio channel statistics event processsor.
+	 */
+	ctx = &adapter->dsrc_chan_stats;
+	ctx->config_chans_num = config->channel_count;
+	for (i = 0; i < config->channel_count; i++)
+		ctx->config_chans_freq[i] = config->channels[i].chan_freq;
+	if (ctx->cur_req) {
+		vos_mem_free(ctx->cur_req);
+		ctx->cur_req = NULL;
+	}
+	/* Disable Channel Statistics */
+	enable_chan_stats = ctx->enable_chan_stats;
+	if (enable_chan_stats)
+		wlan_hdd_dsrc_config_radio_chan_stats(adapter, false);
+
 	hdd_request = hdd_request_alloc(&params);
 	if (!hdd_request) {
 		hddLog(LOGE, FL("Request allocation failure"));
@@ -530,9 +551,8 @@ static int hdd_ocb_set_config_req(hdd_adapter_t *adapter,
 	cookie = hdd_request_cookie(hdd_request);
 
 	hddLog(LOG1, FL("Disabling queues"));
-	netif_tx_disable(adapter->dev);
-	netif_carrier_off(adapter->dev);
-
+	wlan_hdd_netif_queue_control(adapter, WLAN_NETIF_TX_DISABLE_N_CARRIER,
+				     WLAN_CONTROL_PATH);
 	/* Call the SME API to set the config */
 	halStatus = sme_ocb_set_config(
 		((hdd_context_t *)adapter->pHddCtx)->hHal, cookie,
@@ -562,14 +582,36 @@ static int hdd_ocb_set_config_req(hdd_adapter_t *adapter,
 	 * OCB set config command successful.
 	 * Open the TX data path
 	 */
-	if (!hdd_ocb_register_sta(adapter)) {
-		netif_carrier_on(adapter->dev);
-		netif_tx_start_all_queues(
-				    adapter->dev);
-		}
+	if (!hdd_ocb_register_sta(adapter))
+		wlan_hdd_netif_queue_control(adapter,
+					WLAN_START_ALL_NETIF_QUEUE_N_CARRIER,
+					WLAN_CONTROL_PATH);
+	if (enable_chan_stats)
+		wlan_hdd_dsrc_config_radio_chan_stats(adapter, true);
+
+	/*
+	* Net device mtu size is 1500 by default, But for OCB RAW mode,
+	* driver need later convert 802.3 data header to IEEE802.11
+	* data header and EPD header, which will increase total frame
+	* length. In such case, long packet length will exceed the
+	* target credit size. It resulted in that the packet is cut
+	* down, data would be missed and the traffic would be broken.
+	* So decrease the netdev mtu size to work around this issue
+	* in IEEE80211p RAW mode.
+	*/
+	if (config->flags & OCB_CONFIG_FLAG_80211_FRAME_MODE)
+		adapter->dev->mtu = ETH_DATA_LEN - 8;
+	else
+		adapter->dev->mtu = ETH_DATA_LEN;
 
 	/* fall through */
 end:
+	if (rc) {
+		/* Flush already saved configured channel frequence */
+		ctx->config_chans_num = 0;
+		vos_mem_zero(ctx->config_chans_freq, 2 * sizeof(uint32_t));
+	}
+
 	hdd_request_put(hdd_request);
 	return rc;
 }
@@ -595,10 +637,8 @@ static int __iw_set_dot11p_channel_sched(struct net_device *dev,
 	uint8_t *mac_addr;
 	int i, j;
 
-	if (wlan_hdd_validate_context(WLAN_HDD_GET_CTX(adapter))) {
-		hddLog(LOGE, FL("HDD context is not valid"));
+	if (wlan_hdd_validate_context(WLAN_HDD_GET_CTX(adapter)))
 		return -EINVAL;
-	}
 
 	if (adapter->device_mode != WLAN_HDD_OCB) {
 		hddLog(LOGE, FL("Device not in OCB mode!"));
@@ -756,6 +796,12 @@ static const struct nla_policy qca_wlan_vendor_ocb_set_config_policy[
 	[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_FLAGS] = {
 		.type = NLA_U32
 	},
+	[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_DEF_TX_PARAM] = {
+		.type = NLA_BINARY
+	},
+	[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_TA_MAX_DURATION] = {
+		.type = NLA_U32
+	},
 };
 
 static const struct nla_policy qca_wlan_vendor_ocb_set_utc_time_policy[
@@ -848,6 +894,8 @@ struct wlan_hdd_ocb_config_channel {
 	sir_qos_params_t qos_params[MAX_NUM_AC];
 	uint32_t max_pwr;
 	uint32_t min_pwr;
+	uint32_t datarate;
+	uint8_t mac_address[6];
 };
 
 static void wlan_hdd_ocb_config_channel_to_sir_ocb_config_channel(
@@ -874,6 +922,7 @@ static void wlan_hdd_ocb_config_channel_to_sir_ocb_config_channel(
 		dest[i].max_pwr = src[i].max_pwr / 2;
 		dest[i].min_pwr = (src[i].min_pwr + 1) / 2;
 		dest[i].flags = src[i].flags;
+		vos_mem_copy(dest[i].mac_address, src[i].mac_address, 6);
 	}
 }
 
@@ -902,8 +951,11 @@ static int __wlan_hdd_cfg80211_ocb_set_config(struct wiphy *wiphy,
 	struct nlattr *ndl_active_state_list;
 	uint32_t ndl_active_state_list_len;
 	uint32_t flags = 0;
+	uint32_t ta_max_duration = 0;
+	void *def_tx_param = NULL;
+	uint32_t def_tx_param_size = 0;
 	int i;
-	int channel_count, schedule_size;
+	uint32_t channel_count, schedule_size;
 	struct sir_ocb_config *config;
 	int rc = -EINVAL;
 	uint8_t *mac_addr;
@@ -915,10 +967,8 @@ static int __wlan_hdd_cfg80211_ocb_set_config(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	if (wlan_hdd_validate_context(hdd_ctx)) {
-		hddLog(LOGE, FL("HDD context is not valid"));
+	if (wlan_hdd_validate_context(hdd_ctx))
 		return -EINVAL;
-	}
 
 	if (adapter->device_mode != WLAN_HDD_OCB) {
 		hddLog(LOGE, FL("Device not in OCB mode!"));
@@ -926,7 +976,7 @@ static int __wlan_hdd_cfg80211_ocb_set_config(struct wiphy *wiphy,
 	}
 
 	/* Parse the netlink message */
-	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_MAX,
+	if (wlan_cfg80211_nla_parse(tb, QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_MAX,
 			data,
 			data_len, qca_wlan_vendor_ocb_set_config_policy)) {
 		hddLog(LOGE, FL("Invalid ATTR"));
@@ -959,10 +1009,23 @@ static int __wlan_hdd_cfg80211_ocb_set_config(struct wiphy *wiphy,
 	ndl_active_state_list_len = (ndl_active_state_list ?
 				    nla_len(ndl_active_state_list) : 0);
 
-	/* Get the flags */
+	/* Get the flags. This parameter is optional. */
 	if (tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_FLAGS])
 		flags = nla_get_u32(tb[
 			QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_FLAGS]);
+
+	/* Get the default TX parameters. This parameter is optional. */
+	if (tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_DEF_TX_PARAM]) {
+		def_tx_param_size = nla_len(tb[
+			QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_DEF_TX_PARAM]);
+		def_tx_param = nla_data(tb[
+			QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_DEF_TX_PARAM]);
+	}
+
+	/* Get the ta max duration. This parameter is optional. */
+	if (tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_TA_MAX_DURATION])
+		ta_max_duration = nla_get_u32(tb[
+			QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_TA_MAX_DURATION]);
 
 	config = hdd_ocb_config_new(channel_count, schedule_size,
 				    ndl_chan_list_len,
@@ -975,6 +1038,16 @@ static int __wlan_hdd_cfg80211_ocb_set_config(struct wiphy *wiphy,
 	config->channel_count = channel_count;
 	config->schedule_size = schedule_size;
 	config->flags = flags;
+	/*
+	 * Set max duration after the last TA received that the local time set
+	 * by TA is synchronous to other communicating OCB STAs. If it expires,
+	 * the OCB STA itself without UTC time source like GPS thinks that the
+	 * local time of itself is not sync to other STAs and stop scheduling
+	 * DSRC channel switch.
+	 */
+	config->ta_max_duration = ta_max_duration;
+	config->def_tx_param = def_tx_param;
+	config->def_tx_param_size = def_tx_param_size;
 
 	/* Read the channel array */
 	channel_array = tb[QCA_WLAN_VENDOR_ATTR_OCB_SET_CONFIG_CHANNEL_ARRAY];
@@ -1001,10 +1074,19 @@ static int __wlan_hdd_cfg80211_ocb_set_config(struct wiphy *wiphy,
 	adapter->ocb_mac_addr_count = 0;
 
 	/*
-	 * Setup locally administered mac addresses for each channel.
-	 * First channel uses the adapter's address.
+	 * Setup locally managed mac addresses for each channel.
+	 * If no configured mac address set from userspace,
+	 * first channel uses the adapter's default address.
 	 */
 	for (i = 0; i < config->channel_count; i++) {
+		/*
+		 * If dsrc_config not set the mac address, then default mac
+		 * address from dsrc_config app is all zero and invalid.
+		 */
+		if (!vos_is_macaddr_zero(
+		    (v_MACADDR_t *)config->channels[i].mac_address))
+			continue;
+
 		if (i == 0) {
 			vos_mem_copy(config->channels[i].mac_address,
 				adapter->macAddressCurrent.bytes,
@@ -1118,10 +1200,8 @@ static int __wlan_hdd_cfg80211_ocb_set_utc_time(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	if (wlan_hdd_validate_context(hdd_ctx)) {
-		hddLog(LOGE, FL("HDD context is not valid"));
+	if (wlan_hdd_validate_context(hdd_ctx))
 		return -EINVAL;
-	}
 
 	if (adapter->device_mode != WLAN_HDD_OCB) {
 		hddLog(LOGE, FL("Device not in OCB mode!"));
@@ -1134,7 +1214,8 @@ static int __wlan_hdd_cfg80211_ocb_set_utc_time(struct wiphy *wiphy,
 	}
 
 	/* Parse the netlink message */
-	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_OCB_SET_UTC_TIME_MAX,
+	if (wlan_cfg80211_nla_parse(tb,
+		      QCA_WLAN_VENDOR_ATTR_OCB_SET_UTC_TIME_MAX,
 		      data,
 		      data_len, qca_wlan_vendor_ocb_set_utc_time_policy)) {
 		hddLog(LOGE, FL("Invalid ATTR"));
@@ -1225,7 +1306,6 @@ __wlan_hdd_cfg80211_ocb_start_timing_advert(struct wiphy *wiphy,
 	hdd_context_t *hdd_ctx = wiphy_priv(wiphy);
 	struct net_device *dev = wdev->netdev;
 	hdd_adapter_t *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
-	tpAniSirGlobal mac_ctx = PMAC_STRUCT(WLAN_HDD_GET_HAL_CTX(adapter));
 	struct nlattr *tb[QCA_WLAN_VENDOR_ATTR_OCB_START_TIMING_ADVERT_MAX + 1];
 	struct sir_ocb_timing_advert *timing_advert;
 	int rc = -EINVAL;
@@ -1237,10 +1317,8 @@ __wlan_hdd_cfg80211_ocb_start_timing_advert(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	if (wlan_hdd_validate_context(hdd_ctx)) {
-		hddLog(LOGE, FL("HDD context is not valid"));
+	if (wlan_hdd_validate_context(hdd_ctx))
 		return -EINVAL;
-	}
 
 	if (adapter->device_mode != WLAN_HDD_OCB) {
 		hddLog(LOGE, FL("Device not in OCB mode!"));
@@ -1261,7 +1339,8 @@ __wlan_hdd_cfg80211_ocb_start_timing_advert(struct wiphy *wiphy,
 	timing_advert->vdev_id = adapter->sessionId;
 
 	/* Parse the netlink message */
-	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_OCB_START_TIMING_ADVERT_MAX,
+	if (wlan_cfg80211_nla_parse(tb,
+		      QCA_WLAN_VENDOR_ATTR_OCB_START_TIMING_ADVERT_MAX,
 		      data,
 		      data_len,
 		      qca_wlan_vendor_ocb_start_timing_advert_policy)) {
@@ -1284,7 +1363,7 @@ __wlan_hdd_cfg80211_ocb_start_timing_advert(struct wiphy *wiphy,
 		tb[QCA_WLAN_VENDOR_ATTR_OCB_START_TIMING_ADVERT_REPEAT_RATE]);
 
 	timing_advert->template_length =
-		schGenTimingAdvertFrame(mac_ctx,
+		sme_ocb_gen_timing_advert_frame(hdd_ctx->hHal,
 			*(tSirMacAddr *)&adapter->macAddressCurrent.bytes,
 			&timing_advert->template_value,
 			&timing_advert->timestamp_offset,
@@ -1361,10 +1440,8 @@ __wlan_hdd_cfg80211_ocb_stop_timing_advert(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	if (wlan_hdd_validate_context(hdd_ctx)) {
-		hddLog(LOGE, FL("HDD context is not valid"));
+	if (wlan_hdd_validate_context(hdd_ctx))
 		return -EINVAL;
-	}
 
 	if (adapter->device_mode != WLAN_HDD_OCB) {
 		hddLog(LOGE, FL("Device not in OCB mode!"));
@@ -1385,7 +1462,8 @@ __wlan_hdd_cfg80211_ocb_stop_timing_advert(struct wiphy *wiphy,
 	timing_advert->vdev_id = adapter->sessionId;
 
 	/* Parse the netlink message */
-	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_OCB_STOP_TIMING_ADVERT_MAX,
+	if (wlan_cfg80211_nla_parse(tb,
+		      QCA_WLAN_VENDOR_ATTR_OCB_STOP_TIMING_ADVERT_MAX,
 		      data,
 		      data_len,
 		      qca_wlan_vendor_ocb_stop_timing_advert_policy)) {
@@ -1511,10 +1589,8 @@ __wlan_hdd_cfg80211_ocb_get_tsf_timer(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	if (wlan_hdd_validate_context(hdd_ctx)) {
-		hddLog(LOGE, FL("HDD context is not valid"));
+	if (wlan_hdd_validate_context(hdd_ctx))
 		return -EINVAL;
-	}
 
 	if (adapter->device_mode != WLAN_HDD_OCB) {
 		hddLog(LOGE, FL("Device not in OCB mode!"));
@@ -1736,10 +1812,8 @@ static int __wlan_hdd_cfg80211_dcc_get_stats(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	if (wlan_hdd_validate_context(hdd_ctx)) {
-		hddLog(LOGE, FL("HDD context is not valid"));
+	if (wlan_hdd_validate_context(hdd_ctx))
 		return -EINVAL;
-	}
 
 	if (adapter->device_mode != WLAN_HDD_OCB) {
 		hddLog(LOGE, FL("Device not in OCB mode!"));
@@ -1752,7 +1826,7 @@ static int __wlan_hdd_cfg80211_dcc_get_stats(struct wiphy *wiphy,
 	}
 
 	/* Parse the netlink message */
-	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_DCC_GET_STATS_MAX,
+	if (wlan_cfg80211_nla_parse(tb, QCA_WLAN_VENDOR_ATTR_DCC_GET_STATS_MAX,
 		      data,
 		      data_len,
 		      qca_wlan_vendor_dcc_get_stats)) {
@@ -1910,10 +1984,8 @@ static int __wlan_hdd_cfg80211_dcc_clear_stats(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	if (wlan_hdd_validate_context(hdd_ctx)) {
-		hddLog(LOGE, FL("HDD context is not valid"));
+	if (wlan_hdd_validate_context(hdd_ctx))
 		return -EINVAL;
-	}
 
 	if (adapter->device_mode != WLAN_HDD_OCB) {
 		hddLog(LOGE, FL("Device not in OCB mode!"));
@@ -1926,7 +1998,8 @@ static int __wlan_hdd_cfg80211_dcc_clear_stats(struct wiphy *wiphy,
 	}
 
 	/* Parse the netlink message */
-	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_DCC_CLEAR_STATS_MAX,
+	if (wlan_cfg80211_nla_parse(tb,
+		      QCA_WLAN_VENDOR_ATTR_DCC_CLEAR_STATS_MAX,
 		      data,
 		      data_len,
 		      qca_wlan_vendor_dcc_clear_stats)) {
@@ -2045,10 +2118,8 @@ static int __wlan_hdd_cfg80211_dcc_update_ndl(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	if (wlan_hdd_validate_context(hdd_ctx)) {
-		hddLog(LOGE, FL("HDD context is not valid"));
+	if (wlan_hdd_validate_context(hdd_ctx))
 		return -EINVAL;
-	}
 
 	if (adapter->device_mode != WLAN_HDD_OCB) {
 		hddLog(LOGE, FL("Device not in OCB mode!"));
@@ -2061,7 +2132,7 @@ static int __wlan_hdd_cfg80211_dcc_update_ndl(struct wiphy *wiphy,
 	}
 
 	/* Parse the netlink message */
-	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_DCC_UPDATE_NDL_MAX,
+	if (wlan_cfg80211_nla_parse(tb, QCA_WLAN_VENDOR_ATTR_DCC_UPDATE_NDL_MAX,
 		      data,
 		      data_len,
 		      qca_wlan_vendor_dcc_update_ndl)) {
@@ -2210,4 +2281,289 @@ void wlan_hdd_dcc_register_for_dcc_stats_event(hdd_context_t *hdd_ctx)
 		wlan_hdd_dcc_stats_event_callback);
 	if (rc)
 		hddLog(LOGE, FL("Register callback failed: %d"), rc);
+}
+
+static void wlan_hdd_dsrc_update_radio_chan_stats(
+		struct dsrc_radio_chan_stats_ctxt *ctx,
+		struct radio_chan_stats_rsp *resp)
+{
+	int i, j;
+	struct radio_chan_stats_info *src, *dest;
+
+	if (!ctx || !resp)
+		return;
+
+	if (resp->num_chans > ctx->config_chans_num)
+		return;
+
+	src = resp->chan_stats;
+	dest = ctx->chan_stats;
+	/* Check if current event is for previous channel configuration. */
+	for (i = 0; i < resp->num_chans; i++, src++) {
+		if (!src) {
+			hddLog(LOGE, FL("Channel stats data is null"));
+			return;
+		}
+
+		for (j = 0; j < ctx->config_chans_num; j++) {
+			if (src->chan_freq == ctx->config_chans_freq[j])
+				break;
+		}
+		if (j == ctx->config_chans_num) {
+			/*
+			 * This DSRC Channel Radio channel statistics event
+			 * is for previous old channel configuration.
+			 * Now just Ignore this type event and clear saved
+			 * entry in driver. If possible, driver can post
+			 * the recorders to application.
+			 */
+			adf_os_spin_lock(&ctx->chan_stats_lock);
+			ctx->chan_stats_num = 0;
+			vos_mem_zero(dest, 2 * sizeof(*dest));
+			adf_os_spin_unlock(&ctx->chan_stats_lock);
+			hddLog(LOGE, FL("Old Chan Stats Data"));
+			return;
+		}
+	}
+
+	/* Save the first channels statistics event in adapter. */
+	src = resp->chan_stats;
+	if (!ctx->chan_stats_num) {
+		adf_os_spin_lock(&ctx->chan_stats_lock);
+		vos_mem_copy(dest, src, resp->num_chans * sizeof(*src));
+		ctx->chan_stats_num = resp->num_chans;
+		adf_os_spin_unlock(&ctx->chan_stats_lock);
+		return;
+	}
+
+	/* Merge new received channel statistics data to previous entry. */
+	adf_os_spin_lock(&ctx->chan_stats_lock);
+	for (i = 0; i < resp->num_chans; i++, src++) {
+		struct radio_chan_stats_info *dest_entry = NULL;
+		struct radio_chan_stats_info *empty_entry = NULL;
+
+		/* Now only two channel stats supported. */
+		dest = ctx->chan_stats;
+		for (j = 0; j < DSRC_MAX_CHAN_STATS_CNT; j++, dest++) {
+			/* Get empty entry */
+			if (dest->chan_freq == 0) {
+				empty_entry = dest;
+				continue;
+			}
+			if (src->chan_freq == dest->chan_freq) {
+				dest_entry = dest;
+				break;
+			}
+		}
+
+		if (dest_entry) {
+			dest = dest_entry;
+		} else if (empty_entry) {
+			/* Copy new recorders to new entry*/
+			ctx->chan_stats_num++;
+			vos_mem_copy(empty_entry, src, sizeof(*src));
+			continue;
+		} else {
+			adf_os_spin_unlock(&ctx->chan_stats_lock);
+			hddLog(LOGE, FL("No entry found."));
+			return;
+		}
+
+		/* Ignore Invalid statistics data. */
+		if (src->measurement_period == 0) {
+			hddLog(LOGE, FL("Invalid stats data."));
+			continue;
+		}
+
+		/* Merge Channel Statistics. */
+		dest->measurement_period += src->measurement_period;
+		dest->on_chan_us += src->on_chan_us;
+		dest->on_chan_ratio = (uint32_t)vos_do_div64(
+				dest->on_chan_us * 100,
+				dest->measurement_period);
+		dest->tx_duration_us += src->tx_duration_us;
+		dest->rx_duration_us += src->rx_duration_us;
+		if (dest->on_chan_us == 0) {
+			dest->chan_busy_ratio = 0;
+		} else {
+			dest->chan_busy_ratio = (uint32_t)vos_do_div64(
+				(dest->tx_duration_us +
+				 dest->rx_duration_us) * 100,
+				dest->on_chan_us);
+		}
+		dest->tx_mpdus += src->tx_mpdus;
+		dest->tx_msdus += src->tx_msdus;
+		dest->rx_succ_pkts += src->rx_succ_pkts;
+		dest->rx_fail_pkts += src->rx_fail_pkts;
+	}
+	adf_os_spin_unlock(&ctx->chan_stats_lock);
+
+	return;
+}
+
+/**
+ * wlan_hdd_dsrc_radio_chan_stats_event_callback() - Callback function for
+ * WLAN DSRC Radio channel statistics event.
+ * @context_ptr: pointer to radio channel statistics context.
+ * @resp_ptr: pointer to radio channel statistics event buffer.
+ */
+static void wlan_hdd_dsrc_radio_chan_stats_event_callback(void *context_ptr,
+							  void *resp_ptr)
+{
+	int i;
+	struct radio_chan_stats_req *req;
+	struct radio_chan_stats_rsp *resp;
+	struct radio_chan_stats_info *chan_stats;
+	struct dsrc_radio_chan_stats_ctxt *ctx;
+
+	if (!context_ptr || !resp_ptr)
+		return;
+
+	ctx = (struct dsrc_radio_chan_stats_ctxt *)context_ptr;
+	resp = (struct radio_chan_stats_rsp *)resp_ptr;
+	chan_stats = resp->chan_stats;
+
+	if (!chan_stats) {
+		hddLog(LOGE, FL("No channel stats data"));
+		return;
+	}
+
+	wlan_hdd_dsrc_update_radio_chan_stats(ctx, resp);
+
+	/*
+	 * DSRC Radio channel statistics RADIO_CHAN_STATS event is reported
+	 * to HDD as following cases.
+	 * 1. FW randomly report event caused by overflow,
+	 *	configuration change....
+	 * 2. Firmware response to the request from Host APP.
+	 * Need check whether current event is response for request.
+	 */
+	adf_os_spin_lock(&hdd_context_lock);
+	if ((ctx->magic != HDD_OCB_MAGIC) || (!ctx->cur_req)) {
+		adf_os_spin_unlock(&hdd_context_lock);
+		return;
+	}
+	req = ctx->cur_req;
+	switch (req->req_type) {
+	case WLAN_DSRC_REQUEST_ONE_RADIO_CHAN_STATS:
+		if ((resp->num_chans == 1) &&
+		    (req->chan_freq == chan_stats->chan_freq)) {
+			complete(&ctx->completion_evt);
+			adf_os_spin_unlock(&hdd_context_lock);
+			return;
+		}
+		break;
+	case WLAN_DSRC_REQUEST_ALL_RADIO_CHAN_STATS:
+		if (resp->num_chans != ctx->config_chans_num) {
+			adf_os_spin_unlock(&hdd_context_lock);
+			return;
+		}
+		/* Check response channel is configured. */
+		for (i = 0; i < resp->num_chans; i++) {
+			if (chan_stats[i].chan_freq !=
+			    ctx->config_chans_freq[i]) {
+				adf_os_spin_unlock(&hdd_context_lock);
+				return;
+			}
+		}
+		complete(&ctx->completion_evt);
+		break;
+	}
+	adf_os_spin_unlock(&hdd_context_lock);
+
+	return;
+}
+
+int wlan_hdd_dsrc_config_radio_chan_stats(hdd_adapter_t *adapter,
+					  bool enable_chan_stats)
+{
+	int ret = 0;
+	hdd_context_t *hdd_ctx = WLAN_HDD_GET_CTX(adapter);
+	struct dsrc_radio_chan_stats_ctxt *ctx;
+	struct radio_chan_stats_info *chan_stats;
+
+	if (VOS_FTM_MODE == hdd_get_conparam()) {
+		hddLog(LOGE, FL("Command not allowed in FTM mode"));
+		return -EINVAL;
+	}
+
+	if (wlan_hdd_validate_context(hdd_ctx))
+		return -EINVAL;
+
+	ctx = &adapter->dsrc_chan_stats;
+	if (ctx->enable_chan_stats == enable_chan_stats) {
+		hddLog(LOGE, FL("DSRC channel stats already %s\n"),
+			enable_chan_stats == true ? "enable" : "disable");
+		return ret;
+	}
+
+	ctx->chan_stats_num = 0;
+	chan_stats = ctx->chan_stats;
+	vos_mem_zero(chan_stats, DSRC_MAX_CHAN_STATS_CNT * sizeof(*chan_stats));
+
+	if (enable_chan_stats) {
+		adf_os_spinlock_init(&ctx->chan_stats_lock);
+		ret = sme_register_radio_chan_stats_cb(
+			((hdd_context_t *)adapter->pHddCtx)->hHal, (void *)ctx,
+			wlan_hdd_dsrc_radio_chan_stats_event_callback);
+	} else {
+		ret = sme_unregister_radio_chan_stats_cb(
+			((hdd_context_t *)adapter->pHddCtx)->hHal);
+	}
+
+	ret = process_wma_set_command((int)adapter->sessionId,
+			(int)WMI_PDEV_PARAM_RADIO_CHAN_STATS_ENABLE,
+			enable_chan_stats, PDEV_CMD);
+
+	if (!ret)
+		ctx->enable_chan_stats = enable_chan_stats;
+
+	return ret;
+}
+
+int wlan_hdd_dsrc_request_radio_chan_stats(hdd_adapter_t *adapter,
+					   struct radio_chan_stats_req *req)
+{
+	int ret = 0;
+	eHalStatus halStatus;
+	struct dsrc_radio_chan_stats_ctxt *ctx;
+
+	halStatus = sme_request_radio_chan_stats(
+			((hdd_context_t *)adapter->pHddCtx)->hHal, req);
+	if (halStatus != eHAL_STATUS_SUCCESS) {
+		hddLog(LOGE, FL("Error call dsrc chan stats req func."));
+		return -EINVAL;
+	}
+
+	ctx = &adapter->dsrc_chan_stats;
+	init_completion(&ctx->completion_evt);
+	adf_os_spin_lock(&hdd_context_lock);
+	ctx->magic = HDD_OCB_MAGIC;
+	adf_os_spin_unlock(&hdd_context_lock);
+	if (!wait_for_completion_timeout(&ctx->completion_evt,
+		msecs_to_jiffies(WLAN_WAIT_TIME_OCB_CMD))) {
+		hddLog(LOGE, FL("Wait for request completion timedout."));
+		ret = -ETIMEDOUT;
+	}
+
+	adf_os_spin_lock(&hdd_context_lock);
+	ctx->magic = 0;
+	adf_os_spin_unlock(&hdd_context_lock);
+	return ret;
+}
+
+void wlan_hdd_dsrc_deinit_chan_stats(hdd_adapter_t *adapter)
+{
+	struct dsrc_radio_chan_stats_ctxt *ctx;
+
+	if (!adapter)
+		return;
+
+	ctx = &adapter->dsrc_chan_stats;
+	if (ctx->cur_req) {
+		vos_mem_free(ctx->cur_req);
+		ctx->cur_req = NULL;
+	}
+
+	return;
 }

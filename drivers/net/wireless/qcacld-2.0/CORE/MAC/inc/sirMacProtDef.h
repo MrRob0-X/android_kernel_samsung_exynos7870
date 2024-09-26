@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2017 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2017, 2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -42,7 +42,9 @@
 #include "palTypes.h"
 #include "sirTypes.h"
 #include "wni_cfg.h"
-
+#ifdef WLAN_FEATURE_FILS_SK
+#include <lim_fils_defs.h>
+#endif
 
 ///Capability information related
 #define CAPABILITY_INFO_DELAYED_BA_BIT 14
@@ -146,8 +148,12 @@
 #define SIR_MAC_ACTION_MHF            14
 #define SIR_MAC_SELF_PROTECTED        15
 #define SIR_MAC_ACTION_WME            17
+#define SIR_MAC_ACTION_FST            18
 #define SIR_MAC_ACTION_VHT            21
+#define SIR_MAC_ACTION_MAX            256
 
+#define SIR_MAC_ACTION_TX             1
+#define SIR_MAC_ACTION_RX             2
 // QoS management action codes
 
 #define SIR_MAC_QOS_ADD_TS_REQ      0
@@ -160,6 +166,11 @@
 #define SIR_MAC_QOS_DEF_BA_RSP      5
 #define SIR_MAC_QOS_DEL_BA_REQ      6
 #define SIR_MAC_QOS_DEL_BA_RSP      7
+
+#define SIR_MAC_ACTION_MEASURE_REQUEST_ID      0
+#define SIR_MAC_ACTION_MEASURE_REPORT_ID       1
+#define SIR_MAC_ACTION_TPC_REQUEST_ID          2
+#define SIR_MAC_ACTION_TPC_REPORT_ID           3
 
 #define SIR_MAC_ACTION_CHANNEL_SWITCH_ID       4
 
@@ -374,6 +385,7 @@
 #define SIR_MAC_WPA_EID_MAX                255
 
 #define SIR_MAC_EID_VENDOR                221
+#define SIR_MAC_EID_EXT                   255
 
 #define SIR_MAC_WAPI_EID                68
 
@@ -404,11 +416,9 @@
 #define NSS_1x1_MODE 1
 #define NSS_2x2_MODE 2
 
-#ifdef FEATURE_AP_MCC_CH_AVOIDANCE
 #define SIR_MAC_QCOM_VENDOR_EID      200
 #define SIR_MAC_QCOM_VENDOR_OUI      "\x00\xA0\xC6"
 #define SIR_MAC_QCOM_VENDOR_SIZE     3
-#endif /* FEATURE_AP_MCC_CH_AVOIDANCE */
 
 /// Workaround IE to change beacon length when it is 4*n+1
 #define SIR_MAC_ANI_WORKAROUND_EID     255
@@ -438,6 +448,9 @@
 
 #define SIR_MAC_OUI_VERSION_1         1
 
+/* OWE DH Parameter element https://tools.ietf.org/html/rfc8110 */
+#define SIR_DH_PARAMETER_ELEMENT_EXT_EID 32
+
 // OUI and type definition for WPA IE in network byte order
 #define SIR_MAC_WPA_OUI             0x01F25000
 #define SIR_MAC_WME_OUI             0x02F25000
@@ -453,6 +466,10 @@
 
 #define SIR_MAC_CISCO_OUI "\x00\x40\x96"
 #define SIR_MAC_CISCO_OUI_SIZE 3
+
+/* WFA vendor specific TPC OUI */
+#define SIR_MAC_WFA_TPC_OUI           "\x00\x50\xF2\x08\x00"
+#define SIR_MAC_WFA_TPC_OUI_SIZE      5
 
 // min size of wme oui header: oui(3) + type + subtype + version
 #define SIR_MAC_OUI_WME_HDR_MIN       6
@@ -502,6 +519,8 @@
 #define SIR_MAC_NUM_TARGET_IPV6_NS_OFFLOAD_NA   16
 #define SIR_MAC_IPV6_ADDR_LEN               16
 #define SIR_IPV6_ADDR_VALID                 1
+#define SIR_IPV6_ADDR_UC_TYPE               0
+#define SIR_IPV6_ADDR_AC_TYPE               1
 #endif //WLAN_NS_OFFLOAD
 #define SIR_MAC_ARP_OFFLOAD_SIZE        1
 
@@ -643,11 +662,8 @@
 #define IS_WES_MODE_ENABLED(x) \
                     ((x)->roam.configParam.isWESModeEnabled)
 
-#define BA_RECIPIENT       1
-#define BA_INITIATOR       2
-#define BA_BOTH_DIRECTIONS 3
-
 /// Status Code (present in Management response frames) enum
+/* (IEEE Std 802.11-2016, 9.4.1.9, Table 9-46) */
 
 typedef enum eSirMacStatusCodes
 {
@@ -693,7 +709,9 @@ typedef enum eSirMacStatusCodes
     eSIR_MAC_DSSS_OFDM_NOT_SUPPORTED_STATUS       = 26, //Association denied due to requesting station not supporting the DSSS-OFDM option
     // reserved                                     27-29
     eSIR_MAC_TRY_AGAIN_LATER                      = 30, //Association request rejected temporarily, try again later
-    // reserved                                     31
+#ifdef WLAN_FEATURE_11W
+    eSIR_MAC_ROBUST_MGMT_FRAMES_POLICY_VIOLATION_STATUS = 31,    /* Robust management frames policy violation */
+#endif
     eSIR_MAC_QOS_UNSPECIFIED_FAILURE_STATUS       = 32, //Unspecified, QoS-related failure
     eSIR_MAC_QAP_NO_BANDWIDTH_STATUS              = 33, //Association denied because QoS AP has insufficient bandwidth to handle another
                                                         //QoS STA
@@ -728,9 +746,8 @@ typedef enum eSirMacStatusCodes
     eSIR_MAC_DEST_STA_NOT_QSTA_STATUS             = 50, //The Destination STA is not a QoS STA
     eSIR_MAC_INVALID_LISTEN_INTERVAL_STATUS       = 51, //Association denied because the ListenInterval is too large
 
-    eSIR_MAC_DSSS_CCK_RATE_MUST_SUPPORT_STATUS    = 52, //FIXME:
-    eSIR_MAC_DSSS_CCK_RATE_NOT_SUPPORT_STATUS     = 53,
-    eSIR_MAC_PSMP_CONTROLLED_ACCESS_ONLY_STATUS   = 54,
+    eSIR_MAC_INVALID_FT_ACTION_FRAME_COUNT        = 52,
+    eSIR_MAC_INVALID_PMKID                        = 53,
 #ifdef FEATURE_WLAN_ESE
     eSIR_MAC_ESE_UNSPECIFIED_QOS_FAILURE_STATUS   = 200, //ESE-Unspecified, QoS related failure in (Re)Assoc response frames
     eSIR_MAC_ESE_TSPEC_REQ_REFUSED_STATUS         = 201, //ESE-TSPEC request refused due to AP's policy configuration in AddTs Rsp, (Re)Assoc Rsp.
@@ -806,34 +823,6 @@ typedef enum eSirMacReasonCodes
     eSIR_BEACON_MISSED                               = 65534, //We invented this to tell beacon missed case
 } tSirMacReasonCodes;
 
-
-// BA Initiator v/s Recipient
-typedef enum eBADirection
-{
-  eBA_RECIPIENT,
-  eBA_INITIATOR
-} tBADirection;
-
-// A-MPDU/BA Enable/Disable in Tx/Rx direction
-typedef enum eBAEnable
-{
-  eBA_DISABLE,
-  eBA_ENABLE
-} tBAEnable;
-
-// A-MPDU/BA Policy
-typedef enum eBAPolicy
-{
-  eBA_UNCOMPRESSED,
-  eBA_COMPRESSED
-} tBAPolicy;
-
-// A-MPDU/BA Policy
-typedef enum eBAPolicyType
-{
-  eBA_POLICY_DELAYED,
-  eBA_POLICY_IMMEDIATE
-} tBAPolicyType;
 
 /// Frame control field format (2 bytes)
 typedef  __ani_attr_pre_packed struct sSirMacFrameCtl
@@ -1037,6 +1026,14 @@ typedef __ani_attr_pre_packed struct sSirMacRateSet
     tANI_U8  rate[SIR_MAC_RATESET_EID_MAX];
 } __ani_attr_packed tSirMacRateSet;
 
+/** struct merged_mac_rate_set - merged mac rate set
+ * @num_rates: num of rates
+ * @rate: rate list
+ */
+struct merged_mac_rate_set {
+	uint8_t num_rates;
+	uint8_t rate[2 * SIR_MAC_RATESET_EID_MAX];
+};
 
 /* Reserve 1 byte for NULL character in the SSID name field to print in %s */
 typedef __ani_attr_pre_packed struct sSirMacSSid
@@ -1056,8 +1053,7 @@ typedef __ani_attr_pre_packed struct sSirMacWapiInfo
 {
     tANI_U8        length;
     tANI_U8        info[SIR_MAC_MAX_IE_LENGTH];
-} __ani_attr_packed tSirMacWapiInfo, *tpSirMacWapiInfo,
-    tSirMacWapiInfo, *tpSirMacWapiInfo;
+} __ani_attr_packed tSirMacWapiInfo, *tpSirMacWapiInfo;
 
 typedef __ani_attr_pre_packed struct sSirMacFHParamSet
 {
@@ -2072,6 +2068,14 @@ typedef __ani_attr_pre_packed struct sSirMacAuthFrameBody
     tANI_U8      type;   // = SIR_MAC_CHALLENGE_TEXT_EID
     tANI_U8      length; // = SIR_MAC_AUTH_CHALLENGE_LENGTH
     tANI_U8      challengeText[SIR_MAC_AUTH_CHALLENGE_LENGTH];
+#ifdef WLAN_FEATURE_FILS_SK
+    tSirMacRsnInfo rsn_ie;
+    uint8_t assoc_delay_info;
+    uint8_t session[SIR_FILS_SESSION_LENGTH];
+    uint8_t wrapped_data_len;
+    uint8_t wrapped_data[SIR_FILS_WRAPPED_DATA_MAX_SIZE];
+    uint8_t nonce[SIR_FILS_NONCE_LENGTH];
+#endif
 } __ani_attr_packed tSirMacAuthFrameBody, *tpSirMacAuthFrameBody;
 
 typedef __ani_attr_pre_packed struct sSirMacAuthenticationFrame

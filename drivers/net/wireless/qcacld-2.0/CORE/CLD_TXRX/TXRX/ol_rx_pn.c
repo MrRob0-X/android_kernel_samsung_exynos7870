@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011, 2015-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -91,34 +91,6 @@ int ol_rx_pn_wapi_cmp(
     return pn_is_replay;
 }
 
-int ol_rx_pn_strict_chk(union htt_rx_pn_t *new_pn,
-		      union htt_rx_pn_t *old_pn,
-		      int is_unicast, int pn_len,
-		      int opmode)
-{
-    int rc = 0;
-
-    if (pn_len == 24) {
-	    rc = ((new_pn->pn24 & 0xffffff) == ((old_pn->pn24 & 0xffffff) + 1));
-	    return rc;
-    }
-
-    /* TKIP: 48-bit TSC, CCMP: 48-bit PN */
-    if (pn_len == 48) {
-	    rc = ((new_pn->pn48 & 0xffffffffffffULL) ==
-		  ((old_pn->pn48 & 0xffffffffffffULL) + 1));
-	    return rc;
-    }
-
-    /* WAPI: 128-bit PN */
-    if (pn_len == 128) {
-        /* TODO WAPI is not implemented, bypass this checking*/
-        rc = 1;
-    }
-
-    return rc;
-}
-
 adf_nbuf_t
 ol_rx_pn_check_base(
     struct ol_txrx_vdev_t *vdev,
@@ -135,6 +107,7 @@ ol_rx_pn_check_base(
     int pn_len;
     void *rx_desc;
     int last_pn_valid;
+    enum pn_replay_type replay_type = OL_RX_OTHER_REPLAYS;
 
     /* Make sure host pn check is not redundant */
     if ((adf_os_atomic_read(&peer->fw_pn_check)) ||
@@ -148,6 +121,14 @@ ol_rx_pn_check_base(
     index = htt_rx_msdu_is_wlan_mcast(pdev->htt_pdev, rx_desc) ?
         txrx_sec_mcast : txrx_sec_ucast;
     pn_len = pdev->rx_pn[peer->security[index].sec_type].len;
+
+    if (peer->security[index].sec_type == htt_sec_type_tkip ||
+        peer->security[index].sec_type == htt_sec_type_tkip_nomic) {
+        replay_type = OL_RX_TKIP_REPLAYS;
+    } else if (peer->security[index].sec_type == htt_sec_type_aes_ccmp) {
+        replay_type = OL_RX_CCMP_REPLAYS;
+    }
+
     if (pn_len == 0) {
         return msdu_list;
     }
@@ -209,7 +190,7 @@ ol_rx_pn_check_base(
             }
 
             TXRX_PRINT(log_level,
-                "PN check failed - TID %d, peer %p "
+                "PN check failed - TID %d, peer %pK "
                 "(%02x:%02x:%02x:%02x:%02x:%02x) %s\n"
                 "    old PN (u64 x2)= 0x%08llx %08llx (LSBs = %lld)\n"
                 "    new PN (u64 x2)= 0x%08llx %08llx (LSBs = %lld)\n"
@@ -240,6 +221,7 @@ ol_rx_pn_check_base(
                 OL_RX_ERR_STATISTICS_1(pdev, vdev, peer, rx_desc, OL_RX_ERR_PN);
                 next_msdu = adf_nbuf_next(msdu);
                 htt_rx_desc_frame_free(pdev->htt_pdev, msdu);
+                pdev->pn_replays[replay_type]++;
                 if (msdu == mpdu_tail) {
                     break;
                 } else {
@@ -383,7 +365,7 @@ ol_rx_pn_trace_display(ol_txrx_pdev_handle pdev, int just_once)
         "   count  idx    peer   tid uni  num    LSBs\n");
     do {
         VOS_TRACE(VOS_MODULE_ID_TXRX, VOS_TRACE_LEVEL_INFO,
-            "  %6lld %4d  %p %2d   %d %4d %8d\n",
+            "  %6lld %4d  %pK %2d   %d %4d %8d\n",
             cnt, i,
             pdev->rx_pn_trace.data[i].peer,
             pdev->rx_pn_trace.data[i].tid,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, 2016-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -51,11 +51,11 @@ enum wlan_frm_fmt {
     wlan_frm_fmt_802_3,
 };
 
-#if CFG_TGT_DEFAULT_RX_SKIP_DEFRAG_TIMEOUT_DUP_DETECTION_CHECK
-#define DEFRAG_MIN_TIMEOUT_MS 100
-#else
-#define DEFRAG_MIN_TIMEOUT_MS 0
-#endif
+/* Throttle period Different level Duty Cycle values*/
+#define THROTTLE_DUTY_CYCLE_LEVEL0 (0)
+#define THROTTLE_DUTY_CYCLE_LEVEL1 (50)
+#define THROTTLE_DUTY_CYCLE_LEVEL2 (75)
+#define THROTTLE_DUTY_CYCLE_LEVEL3 (94)
 
 #ifdef IPA_UC_OFFLOAD
 struct wlan_ipa_uc_rsc_t {
@@ -71,7 +71,6 @@ struct wlan_ipa_uc_rsc_t {
 struct txrx_pdev_cfg_t {
 	u8 is_high_latency;
 	u8 defrag_timeout_check;
-    u8 dup_check;
 	u8 rx_pn_check;
 	u8 pn_rx_fwd_check;
 	u8 host_addba;
@@ -85,13 +84,26 @@ struct txrx_pdev_cfg_t {
 	u32 max_vdev;
 	u32 max_nbuf_frags;
 	u32 throttle_period_ms;
+	u8 dutycycle_level[4];
 	enum wlan_frm_fmt frame_type;
 	u8 rx_fwd_disabled;
 	u8 is_packet_log_enabled;
 	u8 is_full_reorder_offload;
+#ifdef WLAN_FEATURE_TSF_PLUS
+	u8 is_ptp_rx_opt_enabled;
+	a_bool_t is_ptp_enabled;
+#endif
 #ifdef IPA_UC_OFFLOAD
 	struct wlan_ipa_uc_rsc_t ipa_uc_rsc;
 #endif /* IPA_UC_OFFLOAD */
+	uint16_t pkt_bundle_timer_value;
+	uint16_t pkt_bundle_size;
+
+#ifdef QCA_SUPPORT_TXRX_DRIVER_TCP_DEL_ACK
+	uint8_t  del_ack_enable;
+	uint16_t del_ack_timer_value;
+	uint16_t del_ack_pkt_count;
+#endif
 
 	struct ol_tx_sched_wrr_ac_specs_t ac_specs[OL_TX_NUM_WMM_AC];
 };
@@ -329,7 +341,7 @@ u_int16_t ol_cfg_target_tx_credit(ol_pdev_handle pdev);
 int ol_cfg_tx_download_size(ol_pdev_handle pdev);
 
 /**
- * brief Specify where defrag timeout is handled
+ * brief Specify where defrag timeout and duplicate detection is handled
  * @details
  *   non-aggregate duplicate detection and timing out stale fragments
  *   requires additional target memory. To reach max client
@@ -344,25 +356,7 @@ int ol_cfg_tx_download_size(ol_pdev_handle pdev);
  *  1 -> host is responsible non-aggregate duplicate detection and
  *          timing out stale fragments.
  */
-int ol_cfg_rx_host_defrag_timeout_check(ol_pdev_handle pdev);
-
-/**
- * brief Specify where duplicate detection is handled
- * @details
- *   non-aggregate duplicate detection and timing out stale fragments
- *   requires additional target memory. To reach max client
- *   configurations (128+), non-aggregate duplicate detection and the
- *   logic to time out stale fragments is moved to the host.
- *
- * @param pdev - handle to the physical device
- * @return
- *  0 -> target is responsible non-aggregate duplicate detection and
- *          timing out stale fragments.
- *
- *  1 -> host is responsible non-aggregate duplicate detection and
- *          timing out stale fragments.
- */
-int ol_cfg_rx_host_duplicate_check(ol_pdev_handle pdev);
+int ol_cfg_rx_host_defrag_timeout_duplicate_check(ol_pdev_handle pdev);
 
 /**
  * brief Query for the period in ms used for throttling for
@@ -379,6 +373,17 @@ int ol_cfg_rx_host_duplicate_check(ol_pdev_handle pdev);
  * @return the total throttle period in ms
  */
 int ol_cfg_throttle_period_ms(ol_pdev_handle pdev);
+
+/**
+ * brief Query for the duty cycle in percentage used for throttling for
+ * thermal mitigation
+ *
+ * @param pdev - handle to the physical device
+ * @param level - duty cycle level
+ * @return the duty cycle level in percentage
+ */
+int ol_cfg_throttle_duty_cycle_level(ol_pdev_handle pdev, int level);
+
 
 /**
  * brief Check whether full reorder offload is
@@ -481,6 +486,38 @@ void ol_set_cfg_packet_log_enabled(ol_pdev_handle pdev, u_int8_t val);
  */
 u_int8_t ol_cfg_is_packet_log_enabled(ol_pdev_handle pdev);
 
+#ifdef WLAN_FEATURE_TSF_PLUS
+void ol_set_cfg_ptp_rx_opt_enabled(ol_pdev_handle pdev, u_int8_t val);
+u_int8_t ol_cfg_is_ptp_rx_opt_enabled(ol_pdev_handle pdev);
+a_bool_t ol_cfg_is_ptp_enabled(ol_pdev_handle pdev);
+void ol_cfg_update_ptp_params(struct txrx_pdev_cfg_t *cfg_ctx,
+                             struct txrx_pdev_cfg_param_t cfg_param);
+#else
+static inline void
+ol_set_cfg_ptp_rx_opt_enabled(ol_pdev_handle pdev, u_int8_t val)
+{
+}
+
+static inline u_int8_t
+ol_cfg_is_ptp_rx_opt_enabled(ol_pdev_handle pdev)
+{
+	return 0;
+}
+
+static inline a_bool_t
+ol_cfg_is_ptp_enabled(ol_pdev_handle pdev)
+{
+	return 0;
+}
+
+static inline void
+ol_cfg_update_ptp_params(struct txrx_pdev_cfg_t *cfg_ctx,
+                             struct txrx_pdev_cfg_param_t cfg_param)
+{
+	return;
+}
+#endif
+
 #ifdef IPA_UC_OFFLOAD
 /**
  * @brief IPA micro controller data path offload enable or not
@@ -526,6 +563,40 @@ unsigned int ol_cfg_ipa_uc_rx_ind_ring_size(ol_pdev_handle pdev);
  */
 unsigned int ol_cfg_ipa_uc_tx_partition_base(ol_pdev_handle pdev);
 #endif /* IPA_UC_OFFLOAD */
+
+#define DEFAULT_BUNDLE_TIMER_VALUE 100
+
+
+#ifdef QCA_SUPPORT_TXRX_HL_BUNDLE
+int ol_cfg_get_bundle_timer_value(ol_pdev_handle pdev);
+int ol_cfg_get_bundle_size(ol_pdev_handle pdev);
+#else
+static inline
+int ol_cfg_get_bundle_timer_value(ol_pdev_handle pdev)
+{
+	return DEFAULT_BUNDLE_TIMER_VALUE;
+}
+
+static inline
+int ol_cfg_get_bundle_size(ol_pdev_handle pdev)
+{
+	return 0;
+}
+#endif
+
+#ifdef QCA_SUPPORT_TXRX_DRIVER_TCP_DEL_ACK
+int ol_cfg_get_del_ack_timer_value(ol_pdev_handle pdev);
+int ol_cfg_get_del_ack_enable_value(ol_pdev_handle pdev);
+int ol_cfg_get_del_ack_count_value(ol_pdev_handle pdev);
+void ol_cfg_update_del_ack_params(struct txrx_pdev_cfg_t *cfg_ctx,
+	struct txrx_pdev_cfg_param_t cfg_param);
+#else
+static inline
+void ol_cfg_update_del_ack_params(struct txrx_pdev_cfg_t *cfg_ctx,
+	struct txrx_pdev_cfg_param_t cfg_param)
+{
+}
+#endif
 
 int ol_cfg_get_wrr_skip_weight(ol_pdev_handle pdev, int ac);
 

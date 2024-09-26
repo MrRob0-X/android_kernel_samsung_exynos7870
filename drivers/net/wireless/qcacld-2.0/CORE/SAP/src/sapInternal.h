@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2017, 2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -95,13 +95,7 @@ when           who        what, where, why
 #define SAP_DEBUG
 // Used to enable or disable security on the BT-AMP link
 #define WLANSAP_SECURITY_ENABLED_STATE VOS_TRUE
-#ifdef WLAN_FEATURE_MBSSID
-// When MBSSID feature is enabled, SAP context is directly passed to SAP APIs
 #define VOS_GET_SAP_CB(ctx) (ptSapContext)(ctx)
-#else
-// How do I get SAP context from voss context?
-#define VOS_GET_SAP_CB(ctx) vos_get_context( VOS_MODULE_ID_SAP, ctx)
-#endif
 
 #define VOS_GET_HAL_CB(ctx) vos_get_context( VOS_MODULE_ID_PE, ctx)
 //MAC Address length
@@ -141,7 +135,8 @@ typedef enum {
     eSAP_DFS_CAC_WAIT,
     eSAP_STARTING,
     eSAP_STARTED,
-    eSAP_DISCONNECTING
+    eSAP_DISCONNECTING,
+    eSAP_DISCONNECTPENDING
 } eSapFsmStates_t;
 
 /*----------------------------------------------------------------------------
@@ -185,6 +180,9 @@ typedef struct sSapContext {
     // Include the current channel of AP
     v_U32_t             channel;
     v_U32_t             secondary_ch;
+
+    // Include the candidate channel of AP
+    v_U32_t             candidate_ch;
 
     // Include the SME(CSR) sessionId here
     v_U8_t              sessionId;
@@ -251,9 +249,14 @@ typedef struct sSapContext {
     v_U32_t           nStaAddIeLength;
     v_U8_t            pStaAddIE[MAX_ASSOC_IND_IE_LEN];
     v_U8_t            *channelList;
+    uint8_t            num_of_channel;
     tSapChannelListInfo SapChnlList;
     uint16_t           vht_channel_width;
     uint16_t           ch_width_orig;
+#ifdef FEATURE_WLAN_MCC_TO_SCC_SWITCH
+    uint16_t           ch_width_24g_orig;
+    uint16_t           ch_width_5g_orig;
+#endif
 
     // session to scan
     tANI_BOOLEAN        isScanSessionOpen;
@@ -271,16 +274,18 @@ typedef struct sSapContext {
     eCsrBand           currentPreferredBand;
     eCsrBand           scanBandPreference;
     v_U16_t            acsBandSwitchThreshold;
+    uint32_t           auto_channel_select_weight;
     tSapAcsChannelInfo acsBestChannelInfo;
     tANI_BOOLEAN       enableOverLapCh;
 
     struct sap_acs_cfg *acs_cfg;
 #ifdef FEATURE_WLAN_MCC_TO_SCC_SWITCH
     v_U8_t             cc_switch_mode;
+    bool               band_switch_enable;
+    bool               ap_p2pclient_concur_enable;
 #endif
 
-#if defined(FEATURE_WLAN_STA_AP_MODE_DFS_DISABLE) ||\
-    defined(WLAN_FEATURE_MBSSID)
+#if defined(FEATURE_WLAN_STA_AP_MODE_DFS_DISABLE)
     v_BOOL_t           dfs_ch_disable;
 #endif
     tANI_BOOLEAN       isCacEndNotified;
@@ -301,14 +306,23 @@ typedef struct sSapContext {
      */
     struct sap_avoid_channels_info sap_detected_avoid_ch_ie;
 #endif /* FEATURE_AP_MCC_CH_AVOIDANCE */
+    enum sap_acs_dfs_mode  dfs_mode;
+
+    uint16_t beacon_tx_rate;
+    tSirMacRateSet supp_rate_set;
+    tSirMacRateSet extended_rate_set;
+    vos_event_t sap_session_opened_evt;
+    vos_event_t sap_session_closed_evt;
+    eCsrBand	target_band;
+    uint8_t     sub20_channelwidth;
+    uint32_t    backup_channel;
+    vos_list_t  owe_pending_assoc_ind_list;
 } *ptSapContext;
 
 
 /*----------------------------------------------------------------------------
  *  External declarations for global context
  * -------------------------------------------------------------------------*/
-//  The main per-Physical Link (per WLAN association) context.
-extern ptSapContext  gpSapCtx;
 
 /*----------------------------------------------------------------------------
  *  SAP state machine event definition
@@ -982,8 +996,6 @@ SIDE EFFECTS
 ---------------------------------------------------------------------------*/
 void sap_CacResetNotify(tHalHandle hHal);
 
-v_BOOL_t sapAcsChannelCheck(ptSapContext sapContext, v_U8_t channelNumber);
-
 /*
  * This function is added to check if channel is in tx leak range
  *
@@ -1089,7 +1101,25 @@ void sap_config_acs_result(tHalHandle hal, ptSapContext sap_ctx,
  */
 bool sap_check_in_avoid_ch_list(ptSapContext sap_ctx, uint8_t channel);
 #endif
+
+eHalStatus sap_OpenSession(tHalHandle hHal, ptSapContext sapContext,
+                            uint32_t *session_id);
+eHalStatus sap_CloseSession(tHalHandle hHal,
+                            ptSapContext sapContext,
+                            csrRoamSessionCloseCallback callback,
+                            v_BOOL_t valid);
+#ifdef FEATURE_WLAN_MCC_TO_SCC_SWITCH
+bool
+sap_channel_switch_validate(
+	ptSapContext sap_context,
+	tHalHandle hal,
+	uint16_t target_channel,
+	eCsrPhyMode sap_phy_mode,
+	uint8_t cc_switch_mode,
+	uint32_t session_id);
+#endif
 #ifdef __cplusplus
 }
 #endif
+uint8_t sap_select_default_oper_chan_ini(tHalHandle hal, uint32_t acs_11a);
 #endif /* #ifndef WLAN_QCT_WLANSAP_INTERNAL_H */

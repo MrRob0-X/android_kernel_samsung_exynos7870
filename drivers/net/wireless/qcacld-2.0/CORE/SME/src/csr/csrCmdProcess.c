@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -132,7 +132,9 @@ eHalStatus csrMsgProcessor( tpAniSirGlobal pMac,  void *pMsgBuf )
             * workable due to failure or finding the condition meets both SAP and infra/IBSS requirement.
             */
             if( (eWNI_SME_SETCONTEXT_RSP == pSmeRsp->messageType) ||
-                (eWNI_SME_REMOVEKEY_RSP == pSmeRsp->messageType) )
+                (eWNI_SME_REMOVEKEY_RSP == pSmeRsp->messageType) ||
+                (pSmeRsp->messageType == eWNI_SME_FT_PRE_AUTH_RSP) ||
+                (eWNI_SME_GET_STATISTICS_RSP == pSmeRsp->messageType))
             {
                 smsLog(pMac, LOGW, FL(" handling msg 0x%X CSR state is %d"), pSmeRsp->messageType, pMac->roam.curState[pSmeRsp->sessionId]);
                 csrRoamCheckForLinkStatusChange(pMac, pSmeRsp);
@@ -223,8 +225,6 @@ void csrFullPowerCallback(void *pv, eHalStatus status)
 
 }
 
-extern int g_force_hang;
-extern int g_avoid_command;
 void csrFullPowerOffloadCallback(void *pv, tANI_U32 sessionId, eHalStatus status)
 {
     tpAniSirGlobal pMac = PMAC_STRUCT( pv );
@@ -232,10 +232,6 @@ void csrFullPowerOffloadCallback(void *pv, tANI_U32 sessionId, eHalStatus status
     tSmeCmd *pCommand;
 
     (void)status;
-#if 1 /* 20160801 Prevent burst WDA_EXIT_BMPS_REQ during WIFI recovery by HANG */
-	if (g_force_hang && g_avoid_command)
-		return;
-#endif
 
     while(NULL != (pEntry = csrLLRemoveHead(&pMac->roam.roamCmdPendingList,
                                             eANI_BOOLEAN_TRUE)))

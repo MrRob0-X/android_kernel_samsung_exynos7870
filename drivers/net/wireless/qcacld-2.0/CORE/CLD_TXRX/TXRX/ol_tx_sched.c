@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016, 2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -195,12 +195,13 @@ ol_tx_sched_select_batch_rr(
     struct ol_tx_sched_rr_t *scheduler = pdev->tx_sched.scheduler;
     struct ol_tx_active_queues_in_tid_t *txq_queue;
     struct ol_tx_frms_queue_t *next_tq;
-    u_int16_t frames, used_credits, tx_limit, tx_limit_flag = 0;
+    u_int16_t frames, used_credits = 0, tx_limit, tx_limit_flag = 0;
     int bytes;
 
     TX_SCHED_DEBUG_PRINT("Enter %s\n", __func__);
 
-    if (TAILQ_EMPTY(&scheduler->tx_active_tids_list)) return;
+    if (TAILQ_EMPTY(&scheduler->tx_active_tids_list))
+	return used_credits;
 
     txq_queue = TAILQ_FIRST(&scheduler->tx_active_tids_list);
 
@@ -212,10 +213,10 @@ ol_tx_sched_select_batch_rr(
 
     credit = OL_A_MIN(credit, TX_SCH_MAX_CREDIT_FOR_THIS_TID(next_tq));
     frames = next_tq->frms; /* download as many frames as credit allows */
-    tx_limit = ol_tx_bad_peer_dequeue_check(txq, category->specs.send_limit, &tx_limit_flag);
+    tx_limit = ol_tx_bad_peer_dequeue_check(next_tq, frames, &tx_limit_flag);
     frames = ol_tx_dequeue(
-            pdev, txq, &sctx->head, tx_limit, &credit, &bytes);
-    ol_tx_bad_peer_update_tx_limit(pdev, txq, frames, tx_limit_flag);
+	pdev, next_tq, &sctx->head, tx_limit, &credit, &bytes);
+    ol_tx_bad_peer_update_tx_limit(pdev, next_tq, frames, tx_limit_flag);
 
     used_credits = credit;
     txq_queue->frms -= frames;
@@ -425,6 +426,47 @@ ol_txrx_set_wmm_param(ol_txrx_pdev_handle data_pdev, struct ol_tx_wmm_param_t wm
         "Dummy function when OL_TX_SCHED_RR is enabled\n");
 }
 
+/**
+ * ol_tx_sched_stats_display() - tx sched stats display
+ * @pdev: Pointer to the PDEV structure.
+ *
+ * Return: none.
+ */
+void ol_tx_sched_stats_display(struct ol_txrx_pdev_t *pdev)
+{
+}
+
+/**
+ * ol_tx_sched_stats_get() - get tx queue stats
+ * @pdev: Pointer to the PDEV structure.
+ * @data_ptr: tx queue stats will write in this buffer
+ *
+ * Return: none.
+ */
+void ol_tx_sched_stats_get(struct ol_txrx_pdev_t *pdev, void *data_ptr)
+{
+}
+
+/**
+ * ol_tx_sched_cur_state_display() - tx sched cur stat display
+ * @pdev: Pointer to the PDEV structure.
+ *
+ * Return: none.
+ */
+void ol_tx_sched_cur_state_display(struct ol_txrx_pdev_t *pdev)
+{
+}
+
+/**
+ * ol_tx_sched_cur_state_display() - reset tx sched stats
+ * @pdev: Pointer to the PDEV structure.
+ *
+ * Return: none.
+ */
+void ol_tx_sched_stats_clear(struct ol_txrx_pdev_t *pdev)
+{
+}
+
 #endif /* OL_TX_SCHED == OL_TX_SCHED_RR */
 
 /*--- advanced scheduler ----------------------------------------------------*/
@@ -458,6 +500,17 @@ struct ol_tx_sched_wrr_adv_category_info_t {
 #endif
 };
 
+/*this struct members define must same with struct driver_txq_states */
+struct driver_ol_txq_states {
+	char *cat_name;
+	int wrr_count;
+	int pending_frms;
+	int pending_bytes;
+	bool active;
+	int discard_frms;
+	int dispatched_frms;
+};
+
 #define OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(cat, \
     wrr_skip_weight, \
     credit_threshold, \
@@ -489,13 +542,13 @@ struct ol_tx_sched_wrr_adv_category_info_t {
 #ifdef HIF_SDIO
 OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(VO,           1,     17,    24,     0,  1);
 OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(VI,           3,     17,    16,     1,  4);
-#if defined (MSM8976_TCP_PERF) || defined(CONFIG_SEC)
+#if defined (MSM8976_TCP_PERF)
 OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(BE,          10,      9,     8,     1,  8);
 #else
 OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(BE,          10,     17,    16,     1,  8);
 #endif
 OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(BK,          12,      6,     6,     1,  8);
-OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(NON_QOS_DATA,12,      6,     4,     1,  8);
+OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(NON_QOS_DATA,10,     17,    16,     1,  8);
 OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(UCAST_MGMT,   1,      1,     4,     0,  1);
 OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(MCAST_DATA,  10,     17,     4,     1,  4);
 OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(MCAST_MGMT,   1,      1,     4,     0,  1);
@@ -531,6 +584,8 @@ OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(MCAST_MGMT,   1,      1,     4,     0,  1);
         ol_tx_sched_wrr_adv_cat_cur_state_dump(scheduler)
 #define OL_TX_SCHED_WRR_ADV_CAT_STAT_CLEAR(scheduler)                       \
         ol_tx_sched_wrr_adv_cat_stat_clear(scheduler)
+#define OL_TX_SCHED_WRR_ADV_CAT_STAT(scheduler, data_ptr)                   \
+		ol_tx_sched_wrr_adv_cat_stat(scheduler, data_ptr)
 
 #else   /* DEBUG_HL_LOGGING */
 
@@ -541,6 +596,8 @@ OL_TX_SCHED_WRR_ADV_CAT_CFG_SPEC(MCAST_MGMT,   1,      1,     4,     0,  1);
 #define OL_TX_SCHED_WRR_ADV_CAT_STAT_DUMP(scheduler)
 #define OL_TX_SCHED_WRR_ADV_CAT_CUR_STATE_DUMP(scheduler)
 #define OL_TX_SCHED_WRR_ADV_CAT_STAT_CLEAR(scheduler)
+#define OL_TX_SCHED_WRR_ADV_CAT_STAT(scheduler, data_ptr)
+
 
 #endif  /* DEBUG_HL_LOGGING */
 
@@ -603,6 +660,41 @@ static void ol_tx_sched_wrr_adv_cat_stat_dump
                 scheduler->categories[i].state.frms,
                 scheduler->categories[i].state.wrr_count);
     }
+}
+
+static void ol_tx_sched_wrr_adv_cat_stat
+		(struct ol_tx_sched_wrr_adv_t *scheduler,
+		 struct driver_ol_txq_states *data_ptr)
+{
+	int i;
+
+	VOS_TRACE(VOS_MODULE_ID_TXRX, VOS_TRACE_LEVEL_ERROR,
+		  "Scheduler Stats:");
+	VOS_TRACE(VOS_MODULE_ID_TXRX, VOS_TRACE_LEVEL_ERROR,
+		  "category(CRR,CRT,WSW): Queued Discard Dequeued frms wrr");
+	for (i = 0; i < OL_TX_SCHED_WRR_ADV_NUM_CATEGORIES; ++i) {
+		VOS_TRACE(VOS_MODULE_ID_TXRX, VOS_TRACE_LEVEL_ERROR,
+			  "%12s(%2d, %2d, %2d):  %6d  %7d  %8d  %4d  %3d",
+		scheduler->categories[i].stat.cat_name,
+		scheduler->categories[i].specs.credit_reserve,
+		scheduler->categories[i].specs.credit_threshold,
+		scheduler->categories[i].specs.wrr_skip_weight,
+		scheduler->categories[i].stat.queued,
+		scheduler->categories[i].stat.discard,
+		scheduler->categories[i].stat.dispatched,
+		scheduler->categories[i].state.frms,
+		scheduler->categories[i].state.wrr_count);
+
+		data_ptr->cat_name = scheduler->categories[i].stat.cat_name;
+		data_ptr->wrr_count = scheduler->categories[i].state.wrr_count;
+		data_ptr->pending_frms = scheduler->categories[i].state.frms;
+		data_ptr->pending_bytes = scheduler->categories[i].state.bytes;
+		data_ptr->active = scheduler->categories[i].state.active;
+		data_ptr->discard_frms = scheduler->categories[i].stat.discard;
+		data_ptr->dispatched_frms =
+				scheduler->categories[i].stat.dispatched;
+		data_ptr++;
+	}
 }
 
 static void ol_tx_sched_wrr_adv_cat_cur_state_dump
@@ -1112,6 +1204,51 @@ ol_txrx_set_wmm_param(ol_txrx_pdev_handle data_pdev, struct ol_tx_wmm_param_t wm
     }
 }
 
+/**
+ * ol_tx_sched_stats_display() - tx sched stats display
+ * @pdev: Pointer to the PDEV structure.
+ *
+ * Return: none.
+ */
+void ol_tx_sched_stats_display(struct ol_txrx_pdev_t *pdev)
+{
+    OL_TX_SCHED_WRR_ADV_CAT_STAT_DUMP(pdev->tx_sched.scheduler);
+}
+
+/**
+ * ol_tx_sched_stats_get() - get tx queue stats
+ * @pdev: Pointer to the PDEV structure.
+ * @data_ptr: tx queue stats will write in this buffer
+ *
+ * Return: none.
+ */
+void ol_tx_sched_stats_get(struct ol_txrx_pdev_t *pdev, void *data_ptr)
+{
+	OL_TX_SCHED_WRR_ADV_CAT_STAT(pdev->tx_sched.scheduler, data_ptr);
+}
+
+/**
+ * ol_tx_sched_cur_state_display() - tx sched cur stat display
+ * @pdev: Pointer to the PDEV structure.
+ *
+ * Return: none.
+ */
+void ol_tx_sched_cur_state_display(struct ol_txrx_pdev_t *pdev)
+{
+    OL_TX_SCHED_WRR_ADV_CAT_CUR_STATE_DUMP(pdev->tx_sched.scheduler);
+}
+
+/**
+ * ol_tx_sched_cur_state_display() - reset tx sched stats
+ * @pdev: Pointer to the PDEV structure.
+ *
+ * Return: none.
+ */
+void ol_tx_sched_stats_clear(struct ol_txrx_pdev_t *pdev)
+{
+    OL_TX_SCHED_WRR_ADV_CAT_STAT_CLEAR(pdev->tx_sched.scheduler);
+}
+
 #endif /* OL_TX_SCHED == OL_TX_SCHED_WRR_ADV */
 
 /*--- congestion control discard --------------------------------------------*/
@@ -1482,20 +1619,5 @@ ol_tx_sched_log(struct ol_txrx_pdev_t *pdev)
 }
 
 #endif /* defined(DEBUG_HL_LOGGING) */
-
-void ol_tx_sched_stats_display(struct ol_txrx_pdev_t *pdev)
-{
-    OL_TX_SCHED_WRR_ADV_CAT_STAT_DUMP(pdev->tx_sched.scheduler);
-}
-
-void ol_tx_sched_cur_state_display(struct ol_txrx_pdev_t *pdev)
-{
-    OL_TX_SCHED_WRR_ADV_CAT_CUR_STATE_DUMP(pdev->tx_sched.scheduler);
-}
-
-void ol_tx_sched_stats_clear(struct ol_txrx_pdev_t *pdev)
-{
-    OL_TX_SCHED_WRR_ADV_CAT_STAT_CLEAR(pdev->tx_sched.scheduler);
-}
 
 #endif /* defined(CONFIG_HL_SUPPORT) */
