@@ -92,7 +92,8 @@ void nilfs_forget_buffer(struct buffer_head *bh)
 	const unsigned long clear_bits =
 		(1 << BH_Uptodate | 1 << BH_Dirty | 1 << BH_Mapped |
 		 1 << BH_Async_Write | 1 << BH_NILFS_Volatile |
-		 1 << BH_NILFS_Checked | 1 << BH_NILFS_Redirected);
+		 1 << BH_NILFS_Checked | 1 << BH_NILFS_Redirected |
+		 1 << BH_Delay);
 
 	lock_buffer(bh);
 	set_mask_bits(&bh->b_state, clear_bits, 0);
@@ -429,7 +430,8 @@ void nilfs_clear_dirty_page(struct page *page, bool silent)
 		const unsigned long clear_bits =
 			(1 << BH_Uptodate | 1 << BH_Dirty | 1 << BH_Mapped |
 			 1 << BH_Async_Write | 1 << BH_NILFS_Volatile |
-			 1 << BH_NILFS_Checked | 1 << BH_NILFS_Redirected);
+			 1 << BH_NILFS_Checked | 1 << BH_NILFS_Redirected |
+			 1 << BH_Delay);
 
 		bh = head = page_buffers(page);
 		do {
