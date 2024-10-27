@@ -1,3 +1,4 @@
+
 #ifndef _ASM_SOCKET_H
 #define _ASM_SOCKET_H
 
@@ -75,6 +76,9 @@
 #define SO_MAX_PACING_RATE	0x0031
 
 #define SO_BPF_EXTENSIONS	0x0032
+
+#define SO_ATTACH_BPF		0x0034
+#define SO_DETACH_BPF		SO_DETACH_FILTER
 
 /* Security levels - as per NRL IPv6 - don't actually do anything */
 #define SO_SECURITY_AUTHENTICATION		0x5001
