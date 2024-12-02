@@ -622,10 +622,6 @@ static int wg_get_device_dump_real(a, b)
 #define COMPAT_CANNOT_USE_IN6_DEV_GET
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 3, 0)
-#define COMPAT_CANNOT_USE_IFF_NO_QUEUE
-#endif
-
 #if defined(CONFIG_X86_64) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0)
 #include <asm/user.h>
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
