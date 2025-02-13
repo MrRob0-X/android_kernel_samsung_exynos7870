@@ -35,11 +35,6 @@
 /* MALI_SEC_INTEGRATION */
 #include <linux/version.h>
 
-/* MALI_SEC_INTEGRATION */
-#if (LINUX_VERSION_CODE > KERNEL_VERSION(4, 10, 0))
-#include <linux/sched/clock.h>
-#endif
-
 #include <mali_kbase.h>
 #include <mali_kbase_defs.h>
 #include <mali_kbase_hwaccess_instr.h>
